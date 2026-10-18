@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "subject": "math",
+  "module_id": "1.1",
+  "module_title": "演示模块（发布真实内容时沿用主模型编号）",
+  "chapter": "演示章节",
+  "knowledge_id": "DEMO-ONLY-1.1.1",
+  "title": "只读演示：定义域",
+  "reading_content": "> 演示资料，不代表学习证据。\n\n$f(x)=\\sqrt{x-1}$ 要求 $x\\geq1$。",
+  "listening_content": "",
+  "source_note": "虚拟示例，使用时替换为实际教学记录定位",
+  "confirmed_learned": true,
+  "change": "minor",
+  "order": 1
+}

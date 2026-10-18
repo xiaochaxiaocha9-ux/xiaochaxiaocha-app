@@ -1,0 +1,8 @@
+{
+  "content_repo": "content-repo",
+  "queue_dir": "publish-queue",
+  "allow_push": false,
+  "tts": {"engine": "edge", "voice": "zh-CN-XiaoxiaoNeural", "rate": "+0%"},
+  "ffmpeg": "ffmpeg",
+  "ffprobe": "ffprobe"
+}
