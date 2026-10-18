@@ -34,7 +34,7 @@ CI 没有私人测试集时跳过该单独集成项目，执行16项合成核心
 
 ## 尚未验证 / 实际限制
 
-- 私人 GitHub 的真实 Token、跨域请求、实际 API 限额、Actions / Pages 云端部署仍需账号登录与对应仓库配置。模拟测试不是线上验收。
+- 已完成公开 App 仓库及私人资料仓库创建；通过 Git Credential Manager 的已授权登录提交并推送。GitHub Actions 的 Linux 测试、生产构建、Pages 部署均成功；线上首页 HTTP 200，PWA 清单可读取。私人仓库实际通过固定 commit 的 Contents API 读取3个节点与7个附件，所有 SHA-256 一致。手机专用 fine-grained 只读 Token、手机跨域同步及实际 API 限额仍需手机配置与使用验证。
 - iPhone Safari 主屏幕安装、离线重启、锁屏持续播放、跨文件自动续播、耳机、来电打断、存储清理行为尚待真机。Media Session API 接入不代表这些项目均通过。
 - 当前机器的系统默认 Python 与 FFmpeg 命令来自一个损坏目录；开发使用了独立 Python，FFmpeg 合并工具未实际执行。标准用户需安装可用的 FFmpeg / ffprobe 并填写路径才可使用章节合并。合并结果的时间偏移播放尚未接入 PWA。
 - 音频按单节完整下载再播放，适合短知识单元；超大音频会占用内存与存储。没有流式 Range 服务或 Git LFS 支持。

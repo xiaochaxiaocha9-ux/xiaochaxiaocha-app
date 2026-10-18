@@ -1,5 +1,7 @@
 # GitHub Pages 与 iPhone
 
+本次实际部署地址：[随身听](https://xiaochaxiaocha9-ux.github.io/xiaochaxiaocha-app/)。账号为 `xiaochaxiaocha9-ux`，公开 App 仓库 `xiaochaxiaocha-app`，私人资料仓库 `kaoyan-review`，分支均为 `main`，索引路径 `manifest.json`。以下通用说明也适用于迁移到其他账号。
+
 ## 首次部署
 
 1. 用现有 GitHub 账号新建 `xiaochaxiaocha-app`，设为 **Public**，不要上传任何私人资料。描述可以填“小查小查的仓库”。新建 `kaoyan-review`，设为 **Private**，描述“考研复习”。仓库 URL 名只能用 ASCII 字母、数字、`.`、`-`、`_`；中文可以用作说明与应用标题。

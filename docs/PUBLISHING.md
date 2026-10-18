@@ -79,7 +79,7 @@ assets/ef/<完整sha256>.mp3
 
 ```powershell
 git -C .local/content-repo status
-git -C .local/content-repo add manifest.json assets
+git -C .local/content-repo add .gitattributes manifest.json assets
 git -C .local/content-repo commit -m "Publish reviewed derived materials"
 .\tools\publisher.ps1 process --push
 ```

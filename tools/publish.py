@@ -196,6 +196,8 @@ async def apply_job(c, manifest, job, tts=None):
     jobs.append(job['job_id'])
 
 def write_manifest(c, manifest):
+    # Immutable content hashes refer to exact bytes, including LF line endings.
+    atomic(c['content_repo'] / '.gitattributes', b'assets/** -text\nmanifest.json -text\n')
     manifest['items'].sort(key=lambda e: (e['subject'],e.get('order',0),e['knowledge_id']))
     manifest['revision'] = digest(canonical(manifest['items']))
     from datetime import datetime, timezone
@@ -219,6 +221,7 @@ async def process(c, push=False):
             if '@' in remote and remote.startswith('http'):
                 raise ValueError('Do not put credentials in remote URLs; use Git Credential Manager')
             git(c, 'pull', '--ff-only')
+        atomic(c['content_repo'] / '.gitattributes', b'assets/** -text\nmanifest.json -text\n')
         path = c['content_repo'] / 'manifest.json'
         manifest = load(path) if path.exists() else {'schema_version':1,'items':[],'applied_jobs':[]}
         completed = 0
@@ -231,7 +234,10 @@ async def process(c, push=False):
             os.replace(job_path, destination)
             completed += 1
         if push:
-            git(c, 'add', '--', 'manifest.json', 'assets')
+            paths = ['.gitattributes', 'manifest.json']
+            if (c['content_repo'] / 'assets').exists():
+                paths.append('assets')
+            git(c, 'add', '--', *paths)
             if git(c, 'diff', '--cached', '--name-only'):
                 git(c, 'commit', '-m', 'Publish derived study materials')
             git(c, 'push')  # rejected concurrent push is preserved, never force/rebase automatically
@@ -272,6 +278,7 @@ def main():
         c = configured(args)
         if args.command=='init':
             c['content_repo'].mkdir(parents=True,exist_ok=True)
+            atomic(c['content_repo'] / '.gitattributes', b'assets/** -text\nmanifest.json -text\n')
             if not (c['content_repo']/'manifest.json').exists():
                 write_manifest(c,{'schema_version':1,'items':[],'applied_jobs':[]})
             print('Private content layout ready; no master model was read or changed.')
