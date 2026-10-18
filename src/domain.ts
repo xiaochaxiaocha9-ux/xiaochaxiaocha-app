@@ -43,6 +43,8 @@ export interface Entry {
   status: "active" | "archived" | "deleted";
   order: number;
   source_note?: string;
+  source_node_id?: string;
+  learning_state?: string;
 }
 export interface Manifest {
   schema_version: 1;
@@ -141,6 +143,22 @@ export function validateManifest(value: unknown): Manifest {
         (!safePath(e.listening_path) || !hash(e.listening_hash)))
     )
       throw Error("附件格式无效");
+    if (
+      (e.source_node_id !== undefined &&
+        (typeof e.source_node_id !== "string" ||
+          !e.source_node_id ||
+          e.source_node_id.length >= 200 ||
+          (e.knowledge_id !== e.source_node_id &&
+            (!e.knowledge_id.startsWith(e.source_node_id + "-K") ||
+              !/^\d{2,}$/.test(
+                e.knowledge_id.slice(e.source_node_id.length + 2),
+              ))))) ||
+      (e.learning_state !== undefined &&
+        (typeof e.learning_state !== "string" ||
+          !e.learning_state ||
+          e.learning_state.length > 160))
+    )
+      throw Error("来源节点或原始学习状态无效");
     const id = e.subject + "::" + e.knowledge_id;
     if (ids.has(id)) throw Error("资料存在重复知识点 ID");
     ids.add(id);

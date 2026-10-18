@@ -4,14 +4,17 @@ All private runtime state must stay outside the public app source tree (or in .l
 from __future__ import annotations
 import argparse
 import asyncio
+import copy
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from contextlib import contextmanager
@@ -56,18 +59,31 @@ def validate(job):
     for key in ['module_id', 'module_title', 'knowledge_id', 'title', 'chapter']:
         if not isinstance(job.get(key), str) or not 0 < len(job[key]) < 500:
             raise ValueError('Missing or invalid field: ' + key)
-    if job.get('subject') not in SUBJECTS:
+    if not isinstance(job.get('subject'), str) or job['subject'] not in SUBJECTS:
         raise ValueError('Unknown subject')
-    if not isinstance(job.get('order', 0), (int, float)):
+    source = job.get('source_node_id')
+    if source is not None:
+        prefix = {'politics': 'POL-', 'environment': 'ENV-'}.get(job['subject'], '')
+        if not isinstance(source, str) or not 0 < len(source) < 200 or (prefix and not source.startswith(prefix)):
+            raise ValueError('source_node_id must identify the original teaching node of this subject')
+        if job['knowledge_id'] != source and not re.fullmatch(re.escape(source) + r'-K\d{2,}', job['knowledge_id']):
+            raise ValueError('knowledge_id must retain source_node_id or use its stable -K01 style child ID')
+    elif re.search(r'-K\d+$', job['knowledge_id']):
+        raise ValueError('Derived child IDs require source_node_id')
+    if 'learning_state' in job and (not isinstance(job['learning_state'], str) or not 0 < len(job['learning_state']) <= 160):
+        raise ValueError('learning_state must be a short factual source-state description, not an FSRS rating')
+    if 'source_notes' in job:
+        raise ValueError('Use source_note (singular), as required by this publisher')
+    if not isinstance(job.get('order', 0), (int, float)) or isinstance(job.get('order', 0), bool) or not math.isfinite(job.get('order', 0)):
         raise ValueError('order must be numeric')
     if job.get('operation', 'upsert') not in ['upsert', 'archive', 'delete']:
         raise ValueError('operation must be upsert/archive/delete')
     if job.get('change', 'minor') not in ['minor', 'substantive']:
         raise ValueError('change must be minor/substantive')
-    if job.get('expected_content_hash') and not re.fullmatch(r'[a-f0-9]{64}', job['expected_content_hash']):
+    if 'expected_content_hash' in job and (not isinstance(job['expected_content_hash'], str) or not re.fullmatch(r'[a-f0-9]{64}', job['expected_content_hash'])):
         raise ValueError('Invalid expected_content_hash')
     if job.get('operation', 'upsert') == 'upsert':
-        if job.get('confirmed_learned') is not True or not job.get('source_note'):
+        if job.get('confirmed_learned') is not True or not isinstance(job.get('source_note'), str) or not 0 < len(job['source_note']) <= 4000:
             raise ValueError('Only confirmed learned material with source_note may be published')
         if not isinstance(job.get('reading_content'), str) or not job['reading_content'].strip():
             raise ValueError('reading_content required')
@@ -78,23 +94,59 @@ def validate(job):
             raise ValueError('Listening text contains formula/table/Markdown; rewrite for listening or leave empty')
         if len(job['reading_content']) > 300000 or len(listening) > 50000:
             raise ValueError('Split this content into smaller derived units')
+        overrides = job.get('tts', {})
+        if not isinstance(overrides, dict) or set(overrides) - {'voice', 'rate'} or any(not isinstance(v, str) or not 0 < len(v) <= 128 for v in overrides.values()):
+            raise ValueError('Jobs may override voice/rate only, using short string values')
     return job
 
-def enqueue(c, job):
-    validate(job)
+def payload_items(payload):
+    if isinstance(payload, dict) and 'items' in payload:
+        if payload.get('schema_version') != 1 or not isinstance(payload['items'], list) or not 1 <= len(payload['items']) <= 100:
+            raise ValueError('A v1 batch must contain 1-100 items')
+        items = payload['items']
+    else:
+        items = [payload]
+    seen = set()
+    for item in items:
+        validate(item)
+        key = (item['subject'], item['knowledge_id'])
+        if key in seen:
+            raise ValueError('Duplicate knowledge_id in one batch')
+        seen.add(key)
+    return items
+
+def ensure_enabled(c, items):
+    enabled = c.get('enabled_subjects', sorted(SUBJECTS))
+    if not isinstance(enabled, list) or set(enabled) - SUBJECTS:
+        raise ValueError('enabled_subjects must list supported subject names')
+    if any(item['subject'] not in enabled for item in items):
+        raise ValueError('This subject is disabled for new submissions; existing published materials are preserved')
+
+def enqueue(c, payload):
+    items = payload_items(payload)
+    ensure_enabled(c, items)
     jid = f'{time.time_ns()}-{uuid.uuid4().hex}'
-    job = dict(job, job_id=jid)
+    # A complete lesson batch enters the queue with one atomic rename.
+    job = {'schema_version': 1, 'job_id': jid, 'items': [dict(item, job_id=f'{jid}-{i}') for i, item in enumerate(items)]}
     atomic(c['queue_dir'] / 'pending' / (jid + '.json'), canonical(job))
     return jid
 
+class PublisherBusy(ValueError):
+    pass
+
 @contextmanager
-def lock(c):
+def lock(c, wait_seconds=0):
     path = c['queue_dir'] / 'worker.lock'
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        raise ValueError('Another publisher owns worker.lock; after a crash verify its PID has exited before removing the lock') from None
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise PublisherBusy('Another publisher owns worker.lock; submission stays queued. Never delete a live worker lock') from None
+            time.sleep(min(.2, max(0, deadline - time.monotonic())))
     try:
         with os.fdopen(fd, 'w') as f:
             f.write(str(os.getpid()))
@@ -149,6 +201,8 @@ async def apply_job(c, manifest, job, tts=None):
     if existing:
         if existing['module_id'] != job['module_id']:
             raise ValueError('Stable module_id changed; keep original ID')
+        if existing.get('source_node_id') and job.get('source_node_id', existing['source_node_id']) != existing['source_node_id']:
+            raise ValueError('Stable source_node_id changed; keep its original teaching-node mapping')
         if job.get('operation', 'upsert') == 'upsert' and 'change' not in job:
             raise ValueError('Existing content requires explicit change: minor or substantive')
         if job.get('expected_content_hash') != existing['content_hash']:
@@ -165,6 +219,11 @@ async def apply_job(c, manifest, job, tts=None):
         return
     repo = c['content_repo']
     entry = {key:job[key] for key in ['schema_version', 'subject', 'module_id', 'module_title', 'chapter', 'knowledge_id', 'title', 'source_note']}
+    for key in ['source_node_id', 'learning_state']:
+        if key in job:
+            entry[key] = job[key]
+        elif existing and key in existing:
+            entry[key] = existing[key]
     entry.update(status='active', order=job.get('order', 0), learning_revision=(existing or {}).get('learning_revision', 1))
     reading = job['reading_content'].replace('\r\n', '\n').strip() + '\n'
     entry['reading_path'], entry['reading_hash'] = asset(repo, reading.encode('utf-8'), 'md')
@@ -176,7 +235,7 @@ async def apply_job(c, manifest, job, tts=None):
             raise ValueError('Jobs may override voice/rate only; engine commands belong in trusted config')
         opts = {**c.get('tts', {}), **overrides}
         audio_signature = digest(canonical({'text':listening,'tts':opts}))
-        if existing and existing.get('audio_signature') == audio_signature and (repo / existing['audio_path']).exists():
+        if existing and existing.get('audio_signature') == audio_signature and any((root / existing['audio_path']).exists() for root in [repo, c.get('_existing_repo', repo)]):
             entry.update({k:existing[k] for k in ['audio_path', 'audio_hash', 'audio_signature']})
         else:
             temp = c['queue_dir'] / ('audio-' + uuid.uuid4().hex + '.mp3')
@@ -204,44 +263,176 @@ def write_manifest(c, manifest):
     manifest['generated_at'] = datetime.now(timezone.utc).isoformat()
     atomic(c['content_repo'] / 'manifest.json', canonical(manifest))
 
-def git(c, *args):
+def git(c, *args, preserve=False):
     result = subprocess.run(['git', '-C', str(c['content_repo']), *args], capture_output=True, text=True, encoding='utf-8', errors='replace', shell=False)
     if result.returncode:
         raise ValueError('Git operation failed ('+args[0]+'); inspect locally. Credentials/remote output suppressed')
-    return result.stdout.strip()
+    return result.stdout if preserve else result.stdout.strip()
 
-async def process(c, push=False):
+def check_remote(c):
+    remote = git(c, 'remote', 'get-url', 'origin')
+    if '@' in remote and remote.startswith('http'):
+        raise ValueError('Do not put credentials in remote URLs; use Git Credential Manager')
+    expected = c.get('expected_remote')
+    if expected and remote.rstrip('/').removesuffix('.git') != expected.rstrip('/').removesuffix('.git'):
+        raise ValueError('Private checkout origin differs from expected_remote; stop before publishing')
+    if c.get('require_private', False):
+        match = re.fullmatch(r'https://github\.com/([\w.-]+)/([\w.-]+?)(?:\.git)?', remote)
+        if not match:
+            raise ValueError('Privacy verification requires a normal HTTPS GitHub origin URL')
+        from github_setup import api
+        owner, repo = match.groups()
+        if api(owner, f'/repos/{owner}/{repo}').get('private') is not True:
+            raise ValueError('Content repository is not confirmed private; nothing was uploaded')
+
+def dirty_paths(c):
+    return {line[3:].strip('"') for line in git(c, 'status', '--porcelain', '--untracked-files=all', preserve=True).splitlines()}
+
+def staged_files(stage, manifest):
+    files = ['.gitattributes', 'manifest.json']
+    for item in manifest['items']:
+        for kind in ['reading', 'listening', 'audio']:
+            name = item.get(kind + '_path')
+            if name and re.fullmatch(r'assets/[a-f0-9]{2}/[a-f0-9]{64}\.(?:md|txt|mp3)', name) and (stage / name).is_file():
+                files.append(name)
+    return sorted(set(files))
+
+def copy_stage(c, stage, files):
+    for name in files:
+        if name not in ['manifest.json', '.gitattributes']:
+            atomic(c['content_repo'] / name, (stage / name).read_bytes())
+    atomic(c['content_repo'] / '.gitattributes', (stage / '.gitattributes').read_bytes())
+    atomic(c['content_repo'] / 'manifest.json', (stage / 'manifest.json').read_bytes())
+
+def archive_jobs(c, names, published=False, reports=None):
+    done = c['queue_dir'] / 'done'
+    done.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        pending = c['queue_dir'] / 'pending' / name
+        if pending.exists():
+            os.replace(pending, done / name)
+        atomic(c['queue_dir'] / 'receipts' / name, canonical({'state': 'published' if published else 'processed', **(reports or {}).get(name, {})}))
+        (c['queue_dir'] / 'errors' / name).unlink(missing_ok=True)
+
+def remove_stage(c, stage):
+    stage, queue = stage.resolve(), c['queue_dir'].resolve()
+    if stage.parent != queue or not stage.name.startswith('stage-'):
+        raise ValueError('Refusing to clean a staging path outside the publisher queue')
+    shutil.rmtree(stage)
+
+def finish_transaction(c):
+    marker = c['queue_dir'] / 'transaction.json'
+    transaction = load(marker)
+    stage = (c['queue_dir'] / transaction['stage']).resolve()
+    if stage.parent != c['queue_dir'].resolve() or not stage.name.startswith('stage-'):
+        raise ValueError('Invalid saved publisher transaction path')
+    files = transaction['files']
+    if any(name not in ['.gitattributes', 'manifest.json'] and not re.fullmatch(r'assets/[a-f0-9]{2}/[a-f0-9]{64}\.(?:md|txt|mp3)', name) for name in files):
+        raise ValueError('Invalid saved publisher asset path')
+    if any(not re.fullmatch(r'[\w-]+\.json', name) for name in transaction['pending']):
+        raise ValueError('Invalid saved publisher queue path')
+    if dirty_paths(c) - set(files):
+        raise ValueError('Unrelated edits in private checkout; saved publishing transaction retained')
+    head = git(c, 'rev-parse', 'HEAD')
+    if head != transaction['base_head']:
+        # Recover a crash after our commit, without accepting unrelated commits.
+        if git(c, 'rev-parse', 'HEAD^') != transaction['base_head'] or set(git(c, 'diff', '--name-only', transaction['base_head'], head).splitlines()) - set(files):
+            raise ValueError('Git history changed during publication; inspect before retrying')
+        if git(c, 'show', 'HEAD:manifest.json') != (stage / 'manifest.json').read_text(encoding='utf-8').strip():
+            raise ValueError('Saved transaction does not match the current Git commit')
+    copy_stage(c, stage, files)
+    git(c, 'add', '--', *files)
+    if git(c, 'diff', '--cached', '--name-only'):
+        git(c, 'commit', '-m', 'Publish derived study materials')
+    git(c, 'push')  # A rejected push retains the transaction; never force or auto-rebase.
+    archive_jobs(c, transaction['pending'], published=True, reports=transaction.get('reports'))
+    marker.unlink()
+    remove_stage(c, stage)
+
+async def process(c, push=False, wait_seconds=0):
     if push and not c.get('allow_push', False):
         raise ValueError('Set allow_push=true only after user authorizes this private repository')
-    with lock(c):
+    c['_errors'] = []
+    c['_report'] = {'added': 0, 'updated': 0, 'published_items': 0}
+    with lock(c, wait_seconds):
+        marker = c['queue_dir'] / 'transaction.json'
+        if marker.exists():
+            if not push:
+                raise ValueError('A previous push needs recovery; run process --push with the same config')
+            check_remote(c)
+            finish_transaction(c)
         if push:
+            check_remote(c)
             if git(c, 'status', '--porcelain'):
-                raise ValueError('Private checkout has uncommitted edits; review and commit them before publishing with --push')
-            remote = git(c, 'remote', 'get-url', 'origin')
-            if '@' in remote and remote.startswith('http'):
-                raise ValueError('Do not put credentials in remote URLs; use Git Credential Manager')
+                raise ValueError('Private checkout has unrelated uncommitted edits; nothing was changed')
             git(c, 'pull', '--ff-only')
-        atomic(c['content_repo'] / '.gitattributes', b'assets/** -text\nmanifest.json -text\n')
         path = c['content_repo'] / 'manifest.json'
         manifest = load(path) if path.exists() else {'schema_version':1,'items':[],'applied_jobs':[]}
-        completed = 0
-        for job_path in sorted((c['queue_dir'] / 'pending').glob('*.json')):
-            job = load(job_path)
-            await apply_job(c, manifest, job)
-            write_manifest(c, manifest)  # assets first, manifest last. Applied job ID makes crash replay safe.
-            destination = c['queue_dir'] / 'done' / job_path.name
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(job_path, destination)
-            completed += 1
-        if push:
-            paths = ['.gitattributes', 'manifest.json']
-            if (c['content_repo'] / 'assets').exists():
-                paths.append('assets')
-            git(c, 'add', '--', *paths)
-            if git(c, 'diff', '--cached', '--name-only'):
-                git(c, 'commit', '-m', 'Publish derived study materials')
-            git(c, 'push')  # rejected concurrent push is preserved, never force/rebase automatically
-        return completed
+        attempted = set()
+        # Drain work arriving while TTS runs, instead of taking a single queue snapshot.
+        while True:
+            pending = [p for p in sorted((c['queue_dir'] / 'pending').glob('*.json')) if p.name not in attempted]
+            if not pending:
+                break
+            stage = Path(tempfile.mkdtemp(prefix='stage-', dir=c['queue_dir']))
+            stage_config = {**c, 'content_repo': stage, '_existing_repo': c['content_repo']}
+            successful = []
+            reports = {}
+            try:
+                for job_path in pending:
+                    attempted.add(job_path.name)
+                    try:
+                        payload = load(job_path)
+                        items = payload_items(payload)
+                        ensure_enabled(c, items)
+                        trial = copy.deepcopy(manifest)
+                        for i, item in enumerate(items):
+                            item = dict(item, job_id=item.get('job_id', f"{payload['job_id']}-{i}"))
+                            await apply_job(stage_config, trial, item)
+                        before = {(e['subject'], e['knowledge_id']): e for e in manifest['items']}
+                        counts = {'added': 0, 'updated': 0, 'items': len(items)}
+                        for item in trial['items']:
+                            old = before.get((item['subject'], item['knowledge_id']))
+                            if not old:
+                                c['_report']['added'] += 1
+                                counts['added'] += 1
+                            elif old['content_hash'] != item['content_hash']:
+                                c['_report']['updated'] += 1
+                                counts['updated'] += 1
+                        manifest = trial
+                        successful.append(job_path.name)
+                        reports[job_path.name] = counts
+                        c['_report']['published_items'] += len(items)
+                    except (ValueError, OSError, KeyError, json.JSONDecodeError) as error:
+                        message = str(error) if isinstance(error, ValueError) else type(error).__name__
+                        c['_errors'].append({'job': job_path.stem, 'error': message})
+                        atomic(c['queue_dir'] / 'errors' / job_path.name, canonical({'error': message}))
+                if successful:
+                    write_manifest(stage_config, manifest)
+                    files = staged_files(stage, manifest)
+                    if push:
+                        atomic(marker, canonical({'stage': stage.name, 'files': files, 'pending': successful, 'reports': reports, 'base_head': git(c, 'rev-parse', 'HEAD')}))
+                        finish_transaction(c)
+                    else:
+                        copy_stage(c, stage, files)
+                        archive_jobs(c, successful, reports=reports)
+            finally:
+                if stage.exists() and not marker.exists():
+                    remove_stage(c, stage)
+        # Also preserve the maintenance route: local generate -> user-reviewed commit -> push.
+        if push and git(c, 'rev-list', '--count', '@{upstream}..HEAD') != '0':
+            git(c, 'push')
+        return c['_report']['published_items']
+
+def job_status(c, jid):
+    if not re.fullmatch(r'[\w-]+', jid):
+        raise ValueError('Invalid job ID')
+    receipt = c['queue_dir'] / 'receipts' / (jid + '.json')
+    if receipt.exists():
+        return load(receipt)['state']
+    if (c['queue_dir'] / 'done' / (jid + '.json')).exists():
+        return 'processed'
+    return 'pending'
 
 def merge_chapter(c, subject, module, chapter, output):
     """Create a single MP3 + cue JSON for iOS testing. Never modifies node IDs."""
@@ -270,7 +461,10 @@ def main():
     parser.add_argument('--config',help='Local publisher config; or STUDY_PUBLISH_CONFIG')
     commands = parser.add_subparsers(dest='command',required=True)
     q = commands.add_parser('enqueue');q.add_argument('input',type=Path)
-    p = commands.add_parser('process');p.add_argument('--push',action='store_true')
+    p = commands.add_parser('process');p.add_argument('--push',action='store_true');p.add_argument('--wait',type=float,default=0)
+    s = commands.add_parser('submit');s.add_argument('input',type=Path);s.add_argument('--push',action='store_true');s.add_argument('--wait',type=float,default=120)
+    status = commands.add_parser('status');status.add_argument('job_id')
+    catalog = commands.add_parser('catalog');catalog.add_argument('--subject',required=True,choices=sorted(SUBJECTS));catalog.add_argument('--node')
     commands.add_parser('init')
     m = commands.add_parser('merge-chapter');m.add_argument('--subject',required=True,choices=sorted(SUBJECTS));m.add_argument('--module',required=True);m.add_argument('--chapter',required=True);m.add_argument('--output',required=True)
     args = parser.parse_args()
@@ -284,8 +478,34 @@ def main():
             print('Private content layout ready; no master model was read or changed.')
         elif args.command=='enqueue':
             print('Queued:',enqueue(c,load(args.input)))
+        elif args.command=='submit':
+            if not 0 <= args.wait <= 600:
+                raise ValueError('--wait must be between 0 and 600 seconds')
+            jid = enqueue(c, load(args.input))
+            print(json.dumps({'job_id': jid, 'state': 'pending'}), flush=True)
+            try:
+                asyncio.run(process(c, args.push, args.wait))
+            except PublisherBusy:
+                print(json.dumps({'job_id': jid, 'state': 'pending', 'reason': 'publisher_busy'}))
+                return 0
+            receipt = c['queue_dir'] / 'receipts' / (jid + '.json')
+            print(json.dumps({'job_id': jid, 'state': job_status(c, jid), **(load(receipt) if receipt.exists() else {}), 'errors': c['_errors']}, ensure_ascii=False))
+            return 1 if c['_errors'] else 0
         elif args.command=='process':
-            print('Published jobs:',asyncio.run(process(c,args.push)))
+            if not 0 <= args.wait <= 600:
+                raise ValueError('--wait must be between 0 and 600 seconds')
+            asyncio.run(process(c,args.push,args.wait))
+            print(json.dumps({**c['_report'], 'errors': c['_errors']}, ensure_ascii=False))
+            return 1 if c['_errors'] else 0
+        elif args.command=='status':
+            error = c['queue_dir'] / 'errors' / (args.job_id + '.json')
+            state = job_status(c, args.job_id)
+            print(json.dumps({'job_id': args.job_id, 'state': state, 'error': load(error)['error'] if error.exists() else None}, ensure_ascii=False))
+        elif args.command=='catalog':
+            path = c['content_repo'] / 'manifest.json'
+            items = load(path)['items'] if path.exists() else []
+            selected = [e for e in items if e['subject'] == args.subject and (not args.node or e.get('source_node_id', e['knowledge_id']) == args.node)]
+            print(json.dumps([{k: e.get(k) for k in ['subject','module_id','source_node_id','knowledge_id','title','reading_path','listening_path','learning_state','status','content_hash']} for e in selected], ensure_ascii=False, indent=2))
         elif args.command=='merge-chapter':
             with lock(c):
                 merge_chapter(c,args.subject,args.module,args.chapter,args.output)

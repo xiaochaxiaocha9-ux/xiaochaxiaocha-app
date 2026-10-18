@@ -792,6 +792,12 @@ export default function App() {
                           : "已学内容派生资料"}
                       </span>
                       <span>修订 {current.learning_revision}</span>
+                      {current.source_node_id && (
+                        <span>原教学节点 {current.source_node_id}</span>
+                      )}
+                      {current.learning_state && (
+                        <span>来源状态：{current.learning_state}</span>
+                      )}
                     </div>
                   </div>
                   {reviewMap.get(current.key) &&

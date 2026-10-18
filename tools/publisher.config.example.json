@@ -2,7 +2,10 @@
   "content_repo": "content-repo",
   "queue_dir": "publish-queue",
   "allow_push": false,
-  "tts": {"engine": "edge", "voice": "zh-CN-XiaoxiaoNeural", "rate": "+0%"},
+  "enabled_subjects": ["politics", "environment"],
+  "require_private": true,
+  "expected_remote": "https://github.com/YOUR_LOGIN/kaoyan-review.git",
+  "tts": { "engine": "edge", "voice": "zh-CN-XiaoxiaoNeural", "rate": "+0%" },
   "ffmpeg": "ffmpeg",
   "ffprobe": "ffprobe"
 }

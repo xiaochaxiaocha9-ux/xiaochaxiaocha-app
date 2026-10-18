@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:suishenting:content-job:v1",
+  "title": "Study content submission v1 (additive source-node support)",
+  "oneOf": [
+    { "$ref": "#/$defs/job" },
+    {
+      "type": "object",
+      "required": ["schema_version", "items"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/job" }
+        }
+      },
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "label": { "type": "string", "minLength": 1, "maxLength": 499 },
+    "job": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "subject",
+        "module_id",
+        "module_title",
+        "chapter",
+        "knowledge_id",
+        "title"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "subject": { "enum": ["politics", "environment", "english", "math"] },
+        "module_id": { "$ref": "#/$defs/label" },
+        "module_title": { "$ref": "#/$defs/label" },
+        "chapter": { "$ref": "#/$defs/label" },
+        "source_node_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 199
+        },
+        "knowledge_id": { "$ref": "#/$defs/label" },
+        "title": { "$ref": "#/$defs/label" },
+        "reading_content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300000
+        },
+        "listening_content": { "type": "string", "maxLength": 50000 },
+        "learning_state": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "source_note": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "confirmed_learned": {
+          "const": true,
+          "description": "Actually taught, not independently mastered"
+        },
+        "operation": { "enum": ["upsert", "archive", "delete"] },
+        "change": { "enum": ["minor", "substantive"] },
+        "expected_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "order": { "type": "number" },
+        "tts": {
+          "type": "object",
+          "properties": {
+            "voice": { "type": "string" },
+            "rate": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "operation": { "enum": ["archive", "delete"] } },
+            "required": ["operation"]
+          },
+          "then": { "required": ["expected_content_hash"] },
+          "else": {
+            "required": [
+              "reading_content",
+              "confirmed_learned",
+              "source_note",
+              "change"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": { "knowledge_id": { "pattern": "-K[0-9]+$" } }
+          },
+          "then": { "required": ["source_node_id"] }
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
+}

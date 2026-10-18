@@ -35,6 +35,8 @@ npm run preview
 
 具体操作见 [部署与 iPhone 安装](docs/DEPLOYMENT.md)、[内容发布](docs/PUBLISHING.md)、[给四科会话的提示词](docs/SESSION_PROMPT.md)。
 
+日常只启用政治与838环境学。学习会话在节点讲解后生成一份多卡JSON，调用统一的`publisher.ps1 submit <文件> --push`，程序自动排队、生成MP3和上传私人仓库，不需要开发会话定期转交文件。原教学节点通过`source_node_id`保留，小记忆单元使用稳定的`-K01`等派生ID。英语与数学暂不新增，已有资料保持可用。
+
 ## 架构与目录
 
 ```text

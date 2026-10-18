@@ -9,7 +9,9 @@ import urllib.request
 import urllib.error
 
 def api(login, endpoint, method='GET', body=None, raw=False):
-    result=subprocess.run(['git','credential','fill'],input=f'protocol=https\nhost=github.com\nusername={login}\n\n',text=True,capture_output=True,check=True)
+    result=subprocess.run(['git','credential','fill'],input=f'protocol=https\nhost=github.com\nusername={login}\n\n',text=True,capture_output=True)
+    if result.returncode:
+        raise ValueError('Git Credential Manager could not supply the authorized login; check local login and execution permissions')
     fields=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
     token=fields.get('password')
     if not token:raise ValueError('Git Credential Manager login is required')

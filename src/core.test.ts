@@ -198,6 +198,38 @@ describe("incremental content and repository isolation", () => {
     expect(network).not.toHaveBeenCalled();
   });
 });
+describe("derived memory units", () => {
+  it("imports source state without treating it as a completed review", async () => {
+    const k = {
+      ...(await entry("POL-1.4.1-K01")),
+      subject: "politics" as const,
+      module_id: "POL-1.4",
+      source_node_id: "POL-1.4.1",
+      learning_state: "已讲，待独立检查",
+    };
+    const fetcher = vi.fn(async (url: string) =>
+      url.includes("/commits/")
+        ? new Response(JSON.stringify({ sha: "c".repeat(40) }))
+        : url.includes("manifest.json")
+          ? new Response(JSON.stringify(manifest(k)))
+          : new Response("正文"),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    await syncContent({ ...defaultConfig, owner: "me", repo: "study" }, "FAKE");
+    const data = await snapshot();
+    expect(data.items[0].source_node_id).toBe("POL-1.4.1");
+    expect(data.reviews).toHaveLength(0);
+    expect(dueQueue(data.items, data.reviews, now)).toHaveLength(1);
+  });
+  it("rejects a child ID assigned to another source node", async () => {
+    const k = {
+      ...(await entry("POL-1.4.1-K01")),
+      source_node_id: "POL-1.4.2",
+    };
+    expect(() => validateManifest(manifest(k))).toThrow("来源节点");
+  });
+});
+
 describe("backup", () => {
   it("never includes credentials and merges newer records", async () => {
     const k = await entry();

@@ -1,6 +1,27 @@
 # 四科统一发布
 
-这条链路只处理已确认学过的派生资料，不解析或写回长期主模型。
+这条链路只处理已经实际讲授的派生资料，不解析或写回长期主模型。当前启用政治和838环境学；英语二、数学二暂不新增资料。已有资料不会因此删除。
+
+## 日常自动发布：学习会话只调用一次
+
+无需让开发会话定期搬文件，也无需安装常驻服务。政治或专业课会话在讲完节点后生成一个批次JSON，并调用统一入口：
+
+```powershell
+& "<软件项目目录>\tools\publisher.ps1" submit "<批次JSON绝对路径>" --push --wait 120
+```
+
+同一条命令完成结构校验、整批入队、等待独占处理器、MP3生成、索引更新、Git提交和普通推送。每个会话只负责文字内容和调用这一入口，不自己实现Git上传。电脑需联网；执行中的命令需要等待完成，不依赖开发会话在线。
+
+每次用唯一文件名存到`.local/outbox/politics/`或`.local/outbox/environment/`，不要共同覆盖一个大文件。提交文件可以是一个条目，也可以是`{"schema_version":1,"items":[条目1,条目2]}`。同一节点的多张卡作为一个批次，校验或音频失败时整批不入库。
+
+并发调用共用队列和锁，后来的调用最多等待120秒。正在工作的处理器会继续读取新到作业。若返回pending，只能报告待发布，可查询或重试：
+
+```powershell
+.\tools\publisher.ps1 status <job_id>
+.\tools\publisher.ps1 process --push --wait 120
+```
+
+`published`表示已推送，`processed`仅在本地生成，`pending`仍在队列。每批有独立的新增/更新回执，另一个会话代为处理时也不会误报数量。
 
 ## 配置一次
 
@@ -26,15 +47,17 @@ py -3 -m venv .venv
 
 ## 作业结构 v1
 
-`examples/knowledge.example.json` 是可复制的虚拟示例。每个小单元一个作业，阅读版 Markdown 与听觉版纯文本明确分别编写。
+正式协议为`schemas/content-job.schema.json`；`examples/lesson-batch.example.json`展示一课多卡格式。示例不能原样发布。v1新增来源映射字段，兼容旧条目，不迁移既有ID。
 
 | 字段                      | 规则                                                             |
 | ------------------------- | ---------------------------------------------------------------- |
 | `schema_version`          | 固定 1                                                           |
 | `subject`                 | politics / english / math / environment                          |
-| `module_id`               | 沿用主模型原模块 ID，不重新编号                                  |
+| `module_id`               | 原模块分组，例如POL-1.4或ENV-1.1；已有条目不改动                 |
 | `module_title`, `chapter` | 浏览分组名称，允许补充说明                                       |
-| `knowledge_id`            | 原节点 ID，科目内唯一、长期稳定                                  |
+| `source_node_id`          | 原教学节点，例如POL-1.4.1，派生小卡必须显式保留                  |
+| `knowledge_id`            | 派生记忆单元ID，例如POL-1.4.1-K01，科目内唯一且长期稳定          |
+| `learning_state`          | 真实接触/检查状态，仅作来源说明，不转换为FSRS或掌握度            |
 | `title`                   | 当前派生内容的清晰标题                                           |
 | `reading_content`         | 小型 Markdown，可用 `$...$` 和 `$$...$$`                         |
 | `listening_content`       | 适合连续收听的纯文本；不适合听则留空                             |
@@ -46,7 +69,16 @@ py -3 -m venv .venv
 | `order`                   | 科目内排序数字                                                   |
 | `tts`                     | 可选，只能覆盖 `voice` 与 `rate`；引擎命令只允许可信本地配置指定 |
 
-原模型不同科目可以都有 `1.1.1`，前端会按科目隔离。一个原节点只保留一个发布条目；补充内容合并到该条目的正文。需要真正拆为多个独立单元时先制定并保留原 ID 映射，不能随意加编号假装原模型已有。
+不同科目编号按科目隔离。一个教学节点可以派生多张独立小卡：source_node_id保留原编号，knowledge_id加-K01、-K02。这些子编号只属于派生工具，不能回写成主模型新增教学节点。
+
+先查询已占用编号、标题与哈希，再复用或补充：
+
+```powershell
+.\tools\publisher.ps1 catalog --subject politics --node POL-1.4.1
+.\tools\publisher.ps1 catalog --subject environment --node ENV-1.1.2
+```
+
+子ID始终指向同一记忆主题，不因排序、润色或补讲重编号。现有少量旧条目直接使用原节点ID，继续保持有效；若已覆盖独立概念就更新它，不重复建K01。新增别的主题时，在同一来源节点下使用未占用的子ID。新子卡独立开始FSRS，不继承旧整节卡的历史。
 
 初次发布不读取主模型的掌握证据，所有手机卡片都从“尚未复习”开始。原节点只讲过部分时，只导出实际讲过的部分，在来源中注明范围，不能把整章或未教内容塞入该条。
 
@@ -86,7 +118,13 @@ git -C .local/content-repo commit -m "Publish reviewed derived materials"
 
 四个会话的并发保护有两层：独占 worker.lock 避免同时写 Git；`expected_content_hash` 避免两个会话先后覆盖同一知识点的旧版本。冲突会停止队列并保留作业。重新读取最新条目，人工合并该节点，移走旧 pending 作业并重新入队，不能简单替换 hash 来强行接受旧内容。
 
-进程异常退出留下锁时，先查看 `worker.lock` 内的 PID，并确认对应进程确实退出后，才手动删除这个锁文件。不要自动超时夺锁。TTS 失败也保留 pending，可换网络重试。若前面已有作业成功而后续作业失败，先审核并提交已生成文件，再重试。
+TTS先在队列暂存目录生成，整批成功才写入工作副本。失败批次保留pending与errors回执，其他批次继续，不影响正常教学结果。
+
+推送前保存transaction.json。断网或进程退出后，下一次process --push恢复提交与推送，复用已生成音频；成功推送才标记published。无关手工文件或Git历史变更会阻止自动恢复，不擅自覆盖。学习会话不得自行删事务、删队列、改脚本或force push。
+
+异常锁须由维护者确认PID已退出后处理，不按时间自动夺锁。队列和回执是工具运行数据，不是第二份学习主文件。
+
+配置的enabled_subjects目前为politics与environment；expected_remote须填写实际私人仓库，require_private:true会通过已授权的Git登录核对私人状态。首次系统文件/网络执行权限仍遵循平台审核。
 
 ## 修改、归档与删除
 

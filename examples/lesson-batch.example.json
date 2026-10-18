@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "items": [
+    {
+      "schema_version": 1,
+      "subject": "politics",
+      "module_id": "POL-1.4",
+      "module_title": "唯物史观",
+      "chapter": "社会存在与社会意识（示例）",
+      "source_node_id": "POL-1.4.1",
+      "knowledge_id": "POL-1.4.1-K01",
+      "title": "示例：社会存在与社会意识的关系",
+      "reading_content": "> 这是格式示例，正式提交须由教学会话核对实际已讲内容。\n\n社会存在决定社会意识，社会意识反作用于社会存在。其作用通过实践实现。",
+      "listening_content": "这是格式示例。社会存在决定社会意识，社会意识反作用于社会存在，其作用通过实践实现。",
+      "learning_state": "示例；正式提交应填写原模型中的真实接触状态",
+      "source_note": "格式示例，不作为实际已讲来源；正式提交须替换",
+      "confirmed_learned": true,
+      "change": "minor",
+      "order": 140101
+    }
+  ]
+}
