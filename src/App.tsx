@@ -10,7 +10,6 @@ import {
   ChevronRight,
   Play,
   Pause,
-  SkipBack,
   SkipForward,
   Download,
   RefreshCw,
@@ -20,7 +19,6 @@ import {
   WifiOff,
   Moon,
   Sun,
-  Volume2,
   Leaf,
   CheckCircle2,
   RotateCcw,
@@ -56,6 +54,8 @@ import {
 } from "./github";
 import { exportBackup, restoreBackup } from "./backup";
 import { usePlayer } from "./player";
+import { PlaybackControls } from "./PlaybackControls";
+import { subjectPlaylist } from "./playback";
 type Page = "home" | "subject" | "read" | "player" | "review" | "settings";
 const dateText = (s: string | Date) =>
   new Date(s).toLocaleString("zh-CN", {
@@ -105,10 +105,37 @@ export default function App() {
     const db = await database();
     setCached(new Set(await db.getAllKeys("audio")));
   };
-  const player = usePlayer(config, token, report, () => {
-    void refresh();
-  });
+  const player = usePlayer(
+    config,
+    token,
+    report,
+    () => {
+      void refresh();
+    },
+    (k) => {
+      setSelected(k.key);
+      setSubject(k.subject);
+      setLast(k.key);
+      void putSetting("last", k.key);
+      if (selected !== k.key && (page === "read" || page === "player"))
+        window.scrollTo(0, 0);
+    },
+  );
   const go = (p: Page) => {
+    if (p === "player") {
+      const k =
+        player.current ||
+        items.find((x) => x.key === last && x.audio_path) ||
+        items.find(
+          (x) => x.namespace === namespace && active(x) && x.audio_path,
+        );
+      if (k) {
+        setSelected(k.key);
+        setSubject(k.subject);
+        setReviewMode(false);
+        p = "read";
+      } else p = "home";
+    }
     if (p === "review") setFilter("all");
     location.hash = p;
     setPage(p);
@@ -195,6 +222,9 @@ export default function App() {
     };
   }, [namespace]);
   useEffect(() => {
+    if (ready && page === "player") go("player");
+  }, [ready, page]);
+  useEffect(() => {
     const mq = matchMedia("(prefers-color-scheme: dark)"),
       apply = () => {
         document.documentElement.dataset.theme =
@@ -242,8 +272,8 @@ export default function App() {
       )
       .sort((a, b) => a.order - b.order);
   const listen = (k: Knowledge) => {
-    void player.start(k, chapterOf(k));
-    go("player");
+    if (page !== "read" || selected !== k.key) open(k);
+    void player.start(k, subjectPlaylist(visible, k));
   };
   const reviewRate = async (value: 1 | 3) => {
     if (!current || ratingLock.current) return;
@@ -459,7 +489,7 @@ export default function App() {
         )}
         {updateReady && (
           <div className="notice">
-            <span>应用有新版本，更新后可使用新的同步入口。</span>
+            <span>应用有新版本，点击“立即更新”即可使用。</span>
             <button
               className="text-button"
               onClick={() => {
@@ -761,8 +791,8 @@ export default function App() {
                                     onClick={() => {
                                       const k = list.find((k) => k.audio_path);
                                       if (k) {
-                                        void player.start(k, list);
-                                        go("player");
+                                        player.changeMode("next");
+                                        listen(k);
                                       } else report("本章仅提供阅读");
                                     }}
                                   >
@@ -893,15 +923,14 @@ export default function App() {
                         内容有实质修改，请重新学习后自评。以往记录仍保留。
                       </div>
                     )}
+                  {current.audio_path && (
+                    <PlaybackControls
+                      player={player}
+                      item={current}
+                      onStart={() => listen(current)}
+                    />
+                  )}
                   <div className="reading-actions">
-                    <button
-                      className="primary"
-                      disabled={!current.audio_path}
-                      onClick={() => listen(current)}
-                    >
-                      <Headphones size={17} />
-                      {current.audio_path ? "收听本节" : "仅阅读"}
-                    </button>
                     {current.audio_path && (
                       <button
                         className="secondary"
@@ -987,7 +1016,12 @@ export default function App() {
                       <button
                         className="text-button next-review"
                         onClick={() => {
-                          const next = queue.find((k) => k.key !== current.key);
+                          const next = queue.find(
+                            (k) =>
+                              k.subject === current.subject &&
+                              k.namespace === current.namespace &&
+                              k.key !== current.key,
+                          );
                           if (next) open(next, true);
                           else go("review");
                         }}
@@ -1005,166 +1039,6 @@ export default function App() {
                   </button>
                 </div>
               ))}
-            {page === "player" && (
-              <>
-                <div className="page-heading">
-                  <div>
-                    <p className="eyebrow">TAKE KNOWLEDGE WITH YOU</p>
-                    <h1>随身听</h1>
-                    <p className="subtitle">让熟悉的知识，在耳边再经过一次。</p>
-                  </div>
-                </div>
-                {player.current ? (
-                  <section className="player-panel panel">
-                    <div className="album-art">
-                      <Headphones size={86} />
-                      <span>
-                        {
-                          subjects.find(
-                            (s) => s.id === player.current?.subject,
-                          )!.name
-                        }
-                      </span>
-                      <div className="album-lines" />
-                    </div>
-                    <p className="eyebrow">{player.current.chapter}</p>
-                    <h2>{player.current.title}</h2>
-                    <p className="subtle">
-                      {cached.has(audioKey(player.current))
-                        ? "音频已下载 · 可离线播放"
-                        : "正在获取音频"}
-                    </p>
-                    <input
-                      className="seek"
-                      aria-label="播放进度"
-                      type="range"
-                      min="0"
-                      max={
-                        Number.isFinite(player.duration) ? player.duration : 0
-                      }
-                      step="0.1"
-                      value={Math.min(player.time, player.duration || 0)}
-                      onChange={(e) => player.seek(Number(e.target.value))}
-                    />
-                    <div className="time-labels">
-                      <span>{clock(player.time)}</span>
-                      <span>{clock(player.duration)}</span>
-                    </div>
-                    <div className="transport">
-                      <button
-                        aria-label="上一知识点"
-                        onClick={() => player.skip(-1)}
-                      >
-                        <SkipBack size={24} />
-                      </button>
-                      <button
-                        className="play-main"
-                        disabled={player.loading}
-                        aria-label={player.playing ? "暂停" : "播放"}
-                        onClick={player.toggle}
-                      >
-                        {player.loading ? (
-                          <RefreshCw className="spin" />
-                        ) : player.playing ? (
-                          <Pause size={30} />
-                        ) : (
-                          <Play size={30} />
-                        )}
-                      </button>
-                      <button
-                        aria-label="下一知识点"
-                        onClick={() => player.skip(1)}
-                      >
-                        <SkipForward size={24} />
-                      </button>
-                    </div>
-                    <div className="player-tools">
-                      <label>
-                        <Volume2 size={16} />
-                        <select
-                          aria-label="播放速度"
-                          value={player.speed}
-                          onChange={(e) =>
-                            player.changeSpeed(Number(e.target.value))
-                          }
-                        >
-                          {[0.75, 1, 1.25, 1.5, 1.75, 2].map((v) => (
-                            <option key={v} value={v}>
-                              {v}×
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <button
-                        className="text-button"
-                        onClick={() => open(player.current!)}
-                      >
-                        <BookOpen size={16} />
-                        阅读正文
-                      </button>
-                      <button
-                        className="text-button"
-                        disabled={busy}
-                        onClick={() =>
-                          locked(async () => {
-                            const list = chapterOf(player.current!);
-                            for (const k of list.filter((k) => k.audio_path))
-                              await download(k);
-                            report("本章已缓存");
-                          })
-                        }
-                      >
-                        <Download size={16} />
-                        缓存本章
-                      </button>
-                    </div>
-                    <div className="ios-note">
-                      首次请手动点击播放。锁屏、耳机控制及跨文件连续播放仍需
-                      iPhone 真机验证。播放完成不会自动记录“认识”。
-                    </div>
-                  </section>
-                ) : (
-                  <div className="empty">
-                    <Headphones size={40} />
-                    <h2>选一段知识，带着走</h2>
-                    <p>从四科目录打开知识点，点击“收听本节”。</p>
-                    <button className="primary" onClick={() => go("home")}>
-                      浏览四科 <ArrowUpRight size={17} />
-                    </button>
-                  </div>
-                )}
-                {player.current && (
-                  <div className="module">
-                    <h2>本章播放列表</h2>
-                    <section className="panel">
-                      {chapterOf(player.current)
-                        .filter((k) => k.audio_path)
-                        .map((k) => (
-                          <button
-                            key={k.key}
-                            className="knowledge-row"
-                            onClick={() => void player.start(k, chapterOf(k))}
-                          >
-                            <span className="row-icon">
-                              {k.key === player.current?.key ? (
-                                <Volume2 size={19} />
-                              ) : (
-                                <Play size={17} />
-                              )}
-                            </span>
-                            <span className="row-copy">
-                              <strong>{k.title}</strong>
-                              <small>
-                                {cached.has(audioKey(k)) ? "已下载" : "未下载"}
-                              </small>
-                            </span>
-                          </button>
-                        ))}
-                    </section>
-                  </div>
-                )}
-              </>
-            )}
             {page === "settings" && (
               <>
                 <div className="page-heading">
@@ -1419,7 +1293,7 @@ export default function App() {
                     </select>
                   </label>
                   <small className="help">
-                    随身听 v0.1 · 数据结构 v1 · 本地优先
+                    随身听 v0.2 · 数据结构 v1 · 本地优先
                   </small>
                 </section>
               </>
@@ -1434,30 +1308,35 @@ export default function App() {
           <span>随身听 · 个人考研知识库</span>
         </footer>
       </main>
-      {player.current && page !== "player" && (
-        <div className="mini-player">
-          <button className="mini-title" onClick={() => go("player")}>
-            <Headphones size={20} />
-            <span>
-              {player.current.title}
-              <small>
-                {player.playing ? "正在收听" : "继续收听"} ·{" "}
-                {clock(player.time)}
-              </small>
-            </span>
-          </button>
-          <button
-            aria-label={player.playing ? "暂停音频" : "继续音频"}
-            disabled={player.loading}
-            onClick={player.toggle}
-          >
-            {player.playing ? <Pause size={21} /> : <Play size={21} />}
-          </button>
-          <button aria-label="下一条音频" onClick={() => player.skip(1)}>
-            <SkipForward size={20} />
-          </button>
-        </div>
-      )}
+      {player.current &&
+        !(page === "read" && selected === player.current.key) && (
+          <div className="mini-player">
+            <button className="mini-title" onClick={() => go("player")}>
+              <Headphones size={20} />
+              <span>
+                {player.current.title}
+                <small>
+                  {player.playing ? "正在收听" : "继续收听"} ·{" "}
+                  {clock(player.time)}
+                </small>
+              </span>
+            </button>
+            <button
+              aria-label={player.playing ? "暂停音频" : "继续音频"}
+              disabled={player.loading}
+              onClick={player.toggle}
+            >
+              {player.playing ? <Pause size={21} /> : <Play size={21} />}
+            </button>
+            <button
+              aria-label="下一条音频"
+              disabled={!player.hasNext}
+              onClick={() => player.skip(1)}
+            >
+              <SkipForward size={20} />
+            </button>
+          </div>
+        )}
       <nav className="bottom-nav">
         {nav.map((n) => (
           <button

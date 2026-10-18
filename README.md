@@ -2,7 +2,9 @@
 
 一个本地优先的个人听读工具。四科目录、Markdown / LaTeX 阅读、真实 MP3、章节连续播放、离线下载，以及 FSRS 的“忘了 / 认识”两级自评。**不会读取、修改或替代《考研总控模型》**，也不会把自评写成独立掌握证据。
 
-第一版已部署：[打开随身听](https://xiaochaxiaocha9-ux.github.io/xiaochaxiaocha-app/)。iPhone 锁屏、耳机控制及后台跨文件连续播放需要按真机清单验收，不能用桌面浏览器结果代替。
+当前版本 v0.2 已部署：[打开随身听](https://xiaochaxiaocha9-ux.github.io/xiaochaxiaocha-app/)。iPhone 锁屏、耳机控制及后台跨文件连续播放需要按真机清单验收，不能用桌面浏览器结果代替。
+
+收听本节时保留阅读页；控制区可切换“仅播放一次 / 循环本卡片 / 自动下一节”，模式在本机保存。前后切换和自动续播只在同一资料空间、同一科目的有效音频中推进，按模块及卡片顺序排列，跳过仅阅读资料；科目最后一节播完停止。自动与手动换节同步正文，不自动记录复习评价。“连续听”开启自动下一节，“随身听”导航返回当前音频的阅读页。
 
 ## Windows 开始使用
 
@@ -46,8 +48,10 @@ src/
   review.ts           ts-fsrs；原子写入与防重复评价
   github.ts           固定 commit 的 GitHub 读取、哈希校验、增量合并
   backup.ts           无令牌备份，校验后合并恢复
-  player.tsx          单一 Audio 实例、Blob 缓存、Media Session
-  App.tsx             六个主要界面
+  playback.ts         单一 Audio 控制器、三种播放模式、同科队列与切换保护
+  player.tsx          React 状态、播放偏好保存、Blob 缓存与 Media Session
+  PlaybackControls.tsx 阅读页的精简音频控制
+  App.tsx             目录、阅读、复习与设置；正文跟随当前音频
   demo.ts             明确标注的虚拟演示
 tools/
   publish.py          入队、独占处理、TTS、内容寻址资源、可选 Git 推送
