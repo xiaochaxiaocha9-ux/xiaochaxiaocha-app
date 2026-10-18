@@ -702,6 +702,53 @@ main {
   background: var(--green);
   color: #fff;
 }
+.sync-top-button {
+  min-height: 44px;
+  white-space: nowrap;
+}
+.sync-new-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ffe19a;
+}
+.sync-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  padding: 20px;
+  margin-bottom: 24px;
+}
+.sync-panel-copy {
+  flex: 1;
+  min-width: 180px;
+}
+.sync-panel-copy p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+  margin: 7px 0;
+}
+.sync-panel-copy small {
+  color: var(--muted);
+}
+.sync-panel > button {
+  min-height: 44px;
+}
+.sync-result {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.sync-error {
+  color: #b84c3d;
+}
+[data-theme="dark"] .sync-error {
+  color: #ffad9b;
+}
 .secondary {
   background: var(--panel);
   color: var(--green);
@@ -1253,7 +1300,7 @@ main {
     gap: 12px;
   }
   .connection {
-    font-size: 10px;
+    display: none;
   }
   .content {
     padding: 27px 20px 38px;

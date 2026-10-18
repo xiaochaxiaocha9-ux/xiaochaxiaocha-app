@@ -87,7 +87,11 @@ export default function App() {
     [theme, setTheme] = useState("system"),
     [reviewMode, setReviewMode] = useState(false),
     [last, setLast] = useState<string>(),
-    [syncInfo, setSyncInfo] = useState("尚未同步"),
+    [syncInfo, setSyncInfo] = useState("点击同步获取最新资料"),
+    [syncAt, setSyncAt] = useState<string>(),
+    [syncing, setSyncing] = useState(false),
+    [syncError, setSyncError] = useState(false),
+    [hasNewContent, setHasNewContent] = useState(false),
     [updateReady, setUpdateReady] = useState(false);
   const file = useRef<HTMLInputElement>(null),
     ratingLock = useRef(false),
@@ -159,8 +163,10 @@ export default function App() {
                   "sync:" + namespaceOf(c),
                   {},
                 );
-              if (old.revision !== remote.manifest.revision)
-                report("发现新资料，可在设置中点击同步");
+              if (old.revision !== remote.manifest.revision) {
+                setHasNewContent(true);
+                report("发现新资料，点击顶部“同步资料”即可下载");
+              }
             } catch (e) {
               report(e instanceof Error ? e.message : "版本检查失败");
             }
@@ -179,6 +185,15 @@ export default function App() {
       window.removeEventListener("app-update-ready", update);
     };
   }, []);
+  useEffect(() => {
+    let cancelled = false;
+    void setting<{ at?: string }>("sync:" + namespace, {}).then((s) => {
+      if (!cancelled) setSyncAt(s.at);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [namespace]);
   useEffect(() => {
     const mq = matchMedia("(prefers-color-scheme: dark)"),
       apply = () => {
@@ -257,20 +272,37 @@ export default function App() {
   };
   const synchronize = () =>
     locked(async () => {
-      await saveConfig();
-      setSyncInfo("正在连接 GitHub…");
+      setSyncError(false);
+      if (!config.owner || !config.repo || !token.trim()) {
+        const msg = "请先在设置中填写私人仓库和只读令牌，再点击同步资料";
+        setSyncInfo(msg);
+        setSyncError(true);
+        report(msg);
+        go("settings");
+        return;
+      }
+      setSyncing(true);
       try {
+        await saveConfig();
+        setSyncInfo("正在连接 GitHub…");
         const result = await syncContent(config, token, setSyncInfo);
         const ns = namespaceOf(config);
         await putSetting("namespace", ns);
         setNamespace(ns);
         await refresh();
+        setSyncAt(new Date().toISOString());
+        setHasNewContent(false);
         const msg = `同步成功 · 新增 ${result.added} · 更新 ${result.updated} · 共 ${result.total} 条`;
         setSyncInfo(msg);
         report(msg);
       } catch (e) {
-        setSyncInfo("同步失败，原资料已保留");
+        setSyncError(true);
+        setSyncInfo(
+          `同步失败：${e instanceof Error ? e.message : "请稍后重试"}。已有资料仍可使用。`,
+        );
         throw e;
+      } finally {
+        setSyncing(false);
       }
     });
   const backup = () =>
@@ -390,6 +422,17 @@ export default function App() {
               {namespace === "demo" ? "演示空间" : "私人资料"}
             </span>
             <button
+              className="primary sync-top-button"
+              disabled={busy || !ready}
+              onClick={synchronize}
+            >
+              <RefreshCw size={16} className={syncing ? "spin" : ""} />
+              {syncing ? "同步中…" : "同步资料"}
+              {hasNewContent && (
+                <span className="sync-new-dot" aria-label="有新资料" />
+              )}
+            </button>
+            <button
               className="icon-button"
               title="切换深色模式"
               aria-label="切换深色模式"
@@ -416,7 +459,16 @@ export default function App() {
         )}
         {updateReady && (
           <div className="notice">
-            <span>应用有新版本。暂停音频后，重新打开应用更新。</span>
+            <span>应用有新版本，更新后可使用新的同步入口。</span>
+            <button
+              className="text-button"
+              onClick={() => {
+                if (player.playing) player.toggle();
+                window.dispatchEvent(new Event("app-apply-update"));
+              }}
+            >
+              立即更新
+            </button>
           </div>
         )}
         {!ready ? (
@@ -446,6 +498,40 @@ export default function App() {
                     })}
                   </span>
                 </div>
+                <section className="panel sync-panel" aria-label="资料同步">
+                  <div className="sync-panel-copy">
+                    <strong>
+                      {hasNewContent
+                        ? "发现新资料，点击同步下载"
+                        : "学习资料同步"}
+                    </strong>
+                    <p>
+                      新发布的知识点需要点击同步下载；重新打开应用会先显示本机资料。
+                    </p>
+                    <small>
+                      {namespace === "demo"
+                        ? "当前显示演示资料"
+                        : `本机已导入 ${visible.length} 条资料`}
+                      {syncAt
+                        ? ` · 上次同步 ${dateText(syncAt)}`
+                        : " · 尚未同步私人资料"}
+                    </small>
+                  </div>
+                  <button
+                    className="primary"
+                    disabled={busy}
+                    onClick={synchronize}
+                  >
+                    <RefreshCw size={18} className={syncing ? "spin" : ""} />
+                    {syncing ? "正在同步…" : "同步资料"}
+                  </button>
+                  <p
+                    className={"sync-result" + (syncError ? " sync-error" : "")}
+                    role="status"
+                  >
+                    {syncInfo}
+                  </p>
+                </section>
                 <div className="hero-grid">
                   <section className="review-hero">
                     <div className="hero-top">
@@ -1167,8 +1253,8 @@ export default function App() {
                       disabled={busy}
                       onClick={synchronize}
                     >
-                      <RefreshCw size={16} className={busy ? "spin" : ""} />
-                      同步资料
+                      <RefreshCw size={16} className={syncing ? "spin" : ""} />
+                      {syncing ? "正在同步…" : "同步资料"}
                     </button>
                     <button
                       className="text-button danger-text"
@@ -1190,7 +1276,10 @@ export default function App() {
                       清除令牌
                     </button>
                   </div>
-                  <p className="help" role="status">
+                  <p
+                    className={"help" + (syncError ? " sync-error" : "")}
+                    role="status"
+                  >
                     {syncInfo}
                   </p>
                   <label>

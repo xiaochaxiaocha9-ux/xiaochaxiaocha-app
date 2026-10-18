@@ -199,6 +199,46 @@ describe("incremental content and repository isolation", () => {
   });
 });
 describe("derived memory units", () => {
+  it("downloads three newly published politics cards on manual sync and retains existing reviews", async () => {
+    const old = await entry();
+    await commitContent(ns, [old]);
+    await rate(old, 3, "existing-review", now);
+    const additions = await Promise.all(
+      [1, 2, 3].map(async (n) => ({
+        ...(await entry(`POL-1.1.1-K0${n}`)),
+        subject: "politics" as const,
+        module_id: "POL-1.1",
+        source_node_id: "POL-1.1.1",
+        reading_path: `assets/politics-${n}.md`,
+      })),
+    );
+    const remote = { ...manifest(old), items: [old, ...additions] };
+    const fetcher = vi.fn(async (url: string) =>
+      url.includes("/commits/")
+        ? new Response(JSON.stringify({ sha: "c".repeat(40) }))
+        : url.includes("manifest.json")
+          ? new Response(JSON.stringify(remote))
+          : new Response("正文"),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const config = { ...defaultConfig, owner: "me", repo: "study" };
+    expect(await syncContent(config, "FAKE")).toEqual({
+      added: 3,
+      updated: 0,
+      total: 4,
+    });
+    const data = await snapshot();
+    expect(data.items.filter((k) => k.subject === "politics")).toHaveLength(3);
+    expect(data.reviews).toHaveLength(1);
+    expect(await (await database()).getAll("events")).toHaveLength(1);
+    fetcher.mockClear();
+    expect(await syncContent(config, "FAKE")).toEqual({
+      added: 0,
+      updated: 0,
+      total: 4,
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
   it("imports source state without treating it as a completed review", async () => {
     const k = {
       ...(await entry("POL-1.4.1-K01")),
