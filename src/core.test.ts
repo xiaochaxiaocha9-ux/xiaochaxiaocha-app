@@ -12,7 +12,8 @@ import {
   defaultConfig,
 } from "./domain";
 import { exportBackup, restoreBackup } from "./backup";
-import { syncContent, cacheAudio } from "./github";
+import { syncContent, cacheAudio, clearAudioCache } from "./github";
+import { downloadAudioLibrary } from "./audio-download";
 const now = new Date("2026-10-18T08:00:00Z");
 const ns = "me/study/manifest.json";
 const entry = async (id = "1.1.1"): Promise<Knowledge> => ({
@@ -198,6 +199,109 @@ describe("incremental content and repository isolation", () => {
     expect(network).not.toHaveBeenCalled();
   });
 });
+describe("audio download and removal", () => {
+  const audioEntry = async (id = "1.1.1") => ({
+    ...(await entry(id)),
+    audio_path: `assets/${id}.mp3`,
+    audio_hash: await sha256("MP3"),
+  });
+  it("returns MP3 MIME on first download, shares in-flight work, and retries from cache", async () => {
+    const k = await audioEntry(),
+      db = await database();
+    await db.put("settings", { ref: "c".repeat(40) }, `sync:${ns}`);
+    const fetcher = vi.fn(
+      async () =>
+        new Response("MP3", {
+          headers: { "Content-Type": "application/vnd.github.raw+json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const config = { ...defaultConfig, owner: "me", repo: "study" };
+    const [first, concurrent] = await Promise.all([
+      cacheAudio(k, config, "FAKE"),
+      cacheAudio(k, config, "FAKE"),
+    ]);
+    expect(first.type).toBe("audio/mpeg");
+    expect(concurrent.type).toBe("audio/mpeg");
+    expect((await db.get("audio", audioKey(k)))?.blob.type).toBe("audio/mpeg");
+    expect((await cacheAudio(k, config, "")).type).toBe("audio/mpeg");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it("removes only audio and prevents an old in-flight download from restoring it", async () => {
+    const k = await audioEntry(),
+      db = await database();
+    await commitContent(ns, [k]);
+    await rate(k, 3, "keep", now);
+    await db.put("settings", "keep-token", "token");
+    await db.put("settings", { ref: "c".repeat(40) }, `sync:${ns}`);
+    let release!: (response: Response) => void;
+    const fetcher = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const pending = cacheAudio(
+      k,
+      { ...defaultConfig, owner: "me", repo: "study" },
+      "FAKE",
+    );
+    const rejected = expect(pending).rejects.toThrow("已清理");
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+    await clearAudioCache();
+    release(new Response("MP3"));
+    await rejected;
+    expect(await db.getAll("audio")).toHaveLength(0);
+    expect((await snapshot()).items).toHaveLength(1);
+    expect((await snapshot()).reviews).toHaveLength(1);
+    expect(await db.getAll("events")).toHaveLength(1);
+    expect(await db.get("settings", "token")).toBe("keep-token");
+  });
+  it("batch retries keep successful files and download only missing audio", async () => {
+    const a = await audioEntry("1.1.1"),
+      b = await audioEntry("1.1.2"),
+      db = await database();
+    await db.put("settings", { ref: "c".repeat(40) }, `sync:${ns}`);
+    const fetcher = vi.fn(async (url: string) =>
+      url.includes("1.1.2") && fetcher.mock.calls.length <= 2
+        ? new Response("", { status: 500 })
+        : new Response("MP3"),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const load = (k: Knowledge) =>
+      cacheAudio(k, { ...defaultConfig, owner: "me", repo: "study" }, "FAKE");
+    const first = await downloadAudioLibrary(
+      [a, b, await entry("readonly")],
+      load,
+      () => {},
+    );
+    expect(first).toMatchObject({ ready: 1, total: 2 });
+    expect(first.failures).toHaveLength(1);
+    const second = await downloadAudioLibrary([a, b], load, () => {});
+    expect(second).toMatchObject({ ready: 2, total: 2, failures: [] });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(await db.getAll("audio")).toHaveLength(2);
+  });
+  it("stops a batch between files without discarding completed work", async () => {
+    const controller = new AbortController(),
+      a = await audioEntry(),
+      b = await audioEntry("1.1.2");
+    const load = vi.fn(async () => {
+      controller.abort();
+      return new Blob(["MP3"]);
+    });
+    const result = await downloadAudioLibrary(
+      [a, b],
+      load,
+      () => {},
+      controller.signal,
+    );
+    expect(result).toMatchObject({ ready: 1, total: 2, stopped: true });
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("derived memory units", () => {
   it("downloads three newly published politics cards on manual sync and retains existing reviews", async () => {
     const old = await entry();

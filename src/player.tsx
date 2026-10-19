@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { cacheAudio } from "./github";
+import { cacheAudio, cachedAudio } from "./github";
 import { database, audioKey, setting, putSetting } from "./db";
 import { subjects, type Knowledge, type Config, type Position } from "./domain";
 import {
@@ -24,6 +24,7 @@ export function usePlayer(
     engine.current = new PlaybackController(new Audio(), {
       loadAudio: (k) =>
         cacheAudio(k, latest.current.config, latest.current.token),
+      cachedAudio,
       readPosition: async (k) =>
         (
           (await (await database()).get("positions", audioKey(k))) as
@@ -125,6 +126,8 @@ export function usePlayer(
   return {
     ...state,
     start: (k: Knowledge, list?: Knowledge[]) => controller.start(k, list),
+    prepareCached: (items: Knowledge[]) => controller.prepareCached(items),
+    clearAudio: () => controller.clearAudio(),
     skip: (direction: -1 | 1) => controller.skip(direction),
     toggle: () => controller.toggle(),
     seek: (time: number) => controller.seek(time),

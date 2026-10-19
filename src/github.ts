@@ -150,12 +150,42 @@ export async function syncContent(
     total: next.filter((k) => k.status === "active").length,
   };
 }
-export async function cacheAudio(k: Knowledge, c: Config, token: string) {
+let audioEpoch = 0;
+const audioRequests = new Map<string, Promise<Blob>>();
+export async function cachedAudio(k: Knowledge): Promise<Blob | undefined> {
+  const cached = await (await database()).get("audio", audioKey(k));
+  return cached ? new Blob([cached.blob], { type: "audio/mpeg" }) : undefined;
+}
+export async function clearAudioCache() {
+  ++audioEpoch;
+  audioRequests.clear();
+  await (await database()).clear("audio");
+}
+export function cacheAudio(
+  k: Knowledge,
+  c: Config,
+  token: string,
+): Promise<Blob> {
+  const key = audioKey(k);
+  const existing = audioRequests.get(key);
+  if (existing) return existing;
+  const request = fetchAudio(k, c, token, audioEpoch).finally(() => {
+    if (audioRequests.get(key) === request) audioRequests.delete(key);
+  });
+  audioRequests.set(key, request);
+  return request;
+}
+async function fetchAudio(
+  k: Knowledge,
+  c: Config,
+  token: string,
+  epoch: number,
+) {
   if (!k.audio_path || !k.audio_hash) throw Error("该知识点只有阅读版");
   const db = await database(),
     key = audioKey(k),
     cached = await db.get("audio", key);
-  if (cached) return cached.blob;
+  if (cached) return new Blob([cached.blob], { type: "audio/mpeg" });
   let blob: Blob;
   if (k.namespace === "demo") {
     const r = await fetch(import.meta.env.BASE_URL + k.audio_path);
@@ -173,13 +203,15 @@ export async function cacheAudio(k: Knowledge, c: Config, token: string) {
   }
   if ((await sha256(await blob.arrayBuffer())) !== k.audio_hash)
     throw Error("音频校验失败，请重新同步");
+  if (epoch !== audioEpoch) throw Error("音频缓存已清理，请重新点击播放");
+  const mp3 = new Blob([blob], { type: "audio/mpeg" });
   try {
     await db.put("audio", {
       key,
-      blob: new Blob([blob], { type: "audio/mpeg" }),
+      blob: mp3,
     });
   } catch {
     throw Error("存储空间不足，音频未下载；请清理音频缓存");
   }
-  return blob;
+  return mp3;
 }

@@ -51,7 +51,9 @@ import {
   cacheAudio,
   checkVersion,
   validateConfig,
+  clearAudioCache,
 } from "./github";
+import { downloadAudioLibrary } from "./audio-download";
 import { exportBackup, restoreBackup } from "./backup";
 import { usePlayer } from "./player";
 import { PlaybackControls } from "./PlaybackControls";
@@ -92,10 +94,13 @@ export default function App() {
     [syncing, setSyncing] = useState(false),
     [syncError, setSyncError] = useState(false),
     [hasNewContent, setHasNewContent] = useState(false),
+    [audioDownloading, setAudioDownloading] = useState(false),
+    [audioInfo, setAudioInfo] = useState(""),
     [updateReady, setUpdateReady] = useState(false);
   const file = useRef<HTMLInputElement>(null),
     ratingLock = useRef(false),
     busyLock = useRef(false),
+    downloadAbort = useRef<AbortController | null>(null),
     init = useRef(false);
   const report = (s: string) => setNotice(s);
   const refresh = async () => {
@@ -247,6 +252,10 @@ export default function App() {
     subjectInfo = subjects.find((s) => s.id === subject)!,
     subjectItems = visible.filter((k) => k.subject === subject),
     lastItem = visible.find((k) => k.key === last);
+  useEffect(() => {
+    if (ready)
+      void player.prepareCached(items.filter((k) => k.namespace === namespace));
+  }, [ready, items, namespace]);
   const locked = (work: () => Promise<void>) => {
     if (busyLock.current) return;
     busyLock.current = true;
@@ -262,6 +271,59 @@ export default function App() {
     await cacheAudio(k, config, token);
     await refresh();
   };
+  const downloadAll = () =>
+    locked(async () => {
+      const list = visible.filter((k) => k.audio_path);
+      if (!list.length) {
+        report("当前没有可下载音频，请先同步资料");
+        return;
+      }
+      const abort = new AbortController();
+      downloadAbort.current = abort;
+      setAudioDownloading(true);
+      try {
+        const result = await downloadAudioLibrary(
+          list,
+          (k) => cacheAudio(k, config, token),
+          (p) =>
+            setAudioInfo(
+              `已准备 ${p.ready}/${p.total} 段音频${p.failed ? ` · 失败 ${p.failed}` : ""}${p.title ? ` · ${p.title}` : ""}`,
+            ),
+          abort.signal,
+        );
+        await player.prepareCached(list);
+        await refresh();
+        const message = `${result.stopped ? "已停止下载" : result.ready === result.total ? "全部音频已下载，可离线收听" : "音频尚未全部下载"} · ${result.ready}/${result.total}${result.failures.length ? ` · ${result.failures[0]}` : ""}`;
+        setAudioInfo(message);
+        report(message);
+      } finally {
+        downloadAbort.current = null;
+        setAudioDownloading(false);
+      }
+    });
+  const downloadButtons = (
+    <>
+      <button
+        className="secondary"
+        disabled={busy || !visible.some((k) => k.audio_path)}
+        onClick={downloadAll}
+      >
+        <Download size={17} />
+        {audioDownloading ? "正在下载音频…" : "下载全部音频"}
+      </button>
+      {audioDownloading && (
+        <button
+          className="text-button"
+          onClick={() => {
+            downloadAbort.current?.abort();
+            setAudioInfo("正在停止；当前文件处理完后保留已下载音频");
+          }}
+        >
+          停止下载
+        </button>
+      )}
+    </>
+  );
   const chapterOf = (k: Knowledge) =>
     visible
       .filter(
@@ -561,6 +623,12 @@ export default function App() {
                   >
                     {syncInfo}
                   </p>
+                  {downloadButtons}
+                  {audioInfo && (
+                    <p className="sync-result" role="status">
+                      {audioInfo}
+                    </p>
+                  )}
                 </section>
                 <div className="hero-grid">
                   <section className="review-hero">
@@ -1226,6 +1294,15 @@ export default function App() {
                     MP3。恢复按时间合并；音频可重新下载。
                   </p>
                   <div className="settings-divider" />
+                  <p className="help">
+                    先同步资料，再下载全部音频。已下载的文件会自动跳过；新发布音频需要再次下载。清理只删除音频，正文、复习记录和令牌保留。
+                  </p>
+                  <div className="button-row">{downloadButtons}</div>
+                  {audioInfo && (
+                    <p className="help" role="status">
+                      {audioInfo}
+                    </p>
+                  )}
                   <div className="cache-line">
                     <span>
                       <strong>{cached.size}</strong> 份已下载音频
@@ -1235,9 +1312,9 @@ export default function App() {
                       disabled={busy}
                       onClick={() =>
                         locked(async () => {
-                          player.playing && player.toggle();
-                          const db = await database();
-                          await db.clear("audio");
+                          player.clearAudio();
+                          await clearAudioCache();
+                          setAudioInfo("");
                           await refresh();
                           report("音频缓存已清除，阅读和复习记录保留");
                         })
@@ -1293,7 +1370,7 @@ export default function App() {
                     </select>
                   </label>
                   <small className="help">
-                    随身听 v0.2 · 数据结构 v1 · 本地优先
+                    随身听 v0.2.1 · 数据结构 v1 · 本地优先
                   </small>
                 </section>
               </>
