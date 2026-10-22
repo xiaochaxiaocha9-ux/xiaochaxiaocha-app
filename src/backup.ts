@@ -7,6 +7,12 @@ import {
   type Position,
 } from "./domain";
 import { reviveCard } from "./review";
+import {
+  listeningSessions,
+  listeningKey,
+  validListening,
+  type ListeningSession,
+} from "./listening";
 interface Backup {
   schema_version: 1;
   kind: "suishenting-backup";
@@ -15,6 +21,7 @@ interface Backup {
   reviews: Review[];
   events: ReviewEvent[];
   positions: Position[];
+  listening?: ListeningSession[];
 }
 function validCard(c: Review["card"]) {
   return (
@@ -48,6 +55,7 @@ export async function exportBackup() {
     reviews: await db.getAll("reviews"),
     events: await db.getAll("events"),
     positions: await db.getAll("positions"),
+    listening: await listeningSessions(),
   } satisfies Backup;
 }
 export async function restoreBackup(input: unknown) {
@@ -107,9 +115,16 @@ export async function restoreBackup(input: unknown) {
       !time(p.updated_at)
     )
       throw Error("备份播放进度无效");
+  const listening = b.listening === undefined ? [] : b.listening;
+  if (
+    !Array.isArray(listening) ||
+    listening.length > 100000 ||
+    listening.some((s) => !validListening(s))
+  )
+    throw Error("备份收听时长无效");
   const db = await database(),
     tx = db.transaction(
-      ["knowledge", "reviews", "events", "positions"],
+      ["knowledge", "reviews", "events", "positions", "settings"],
       "readwrite",
     );
   for (const k of b.knowledge)
@@ -127,6 +142,18 @@ export async function restoreBackup(input: unknown) {
     const prev = await tx.objectStore("positions").get(p.key);
     if (!prev || Date.parse(p.updated_at) > Date.parse(prev.updated_at))
       await tx.objectStore("positions").put(p);
+  }
+  for (const session of listening) {
+    const previous = (await tx
+      .objectStore("settings")
+      .get(listeningKey(session))) as ListeningSession | undefined;
+    if (previous && previous.key !== session.key) {
+      tx.abort();
+      await tx.done.catch(() => {});
+      throw Error("备份收听记录编号冲突");
+    }
+    if (!previous || session.seconds > previous.seconds)
+      await tx.objectStore("settings").put(session, listeningKey(session));
   }
   await tx.done;
 }

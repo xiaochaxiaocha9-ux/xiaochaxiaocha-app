@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { cacheAudio, cachedAudio } from "./github";
 import { database, audioKey, setting, putSetting } from "./db";
 import { subjects, type Knowledge, type Config, type Position } from "./domain";
+import { saveListening } from "./listening";
 import {
   PlaybackController,
   initialPlayback,
@@ -14,9 +15,25 @@ export function usePlayer(
   report: (s: string) => void,
   refresh: () => void,
   trackChanged: (k: Knowledge) => void,
+  statisticsChanged: () => void,
 ) {
-  const latest = useRef({ config, token, report, refresh, trackChanged });
-  latest.current = { config, token, report, refresh, trackChanged };
+  const latest = useRef({
+    config,
+    token,
+    report,
+    refresh,
+    trackChanged,
+    statisticsChanged,
+  });
+  latest.current = {
+    config,
+    token,
+    report,
+    refresh,
+    trackChanged,
+    statisticsChanged,
+  };
+  const pendingStatistics = useRef(new Set<Promise<void>>());
   const [state, setState] = useState(initialPlayback);
   const engine = useRef<PlaybackController | null>(null);
   const modeEdited = useRef(false);
@@ -40,6 +57,15 @@ export function usePlayer(
       trackChanged: (k) => latest.current.trackChanged(k),
       cached: () => latest.current.refresh(),
       report: (message) => latest.current.report(message),
+      listening: (session) => {
+        const write = saveListening(session)
+          .then(() => latest.current.statisticsChanged())
+          .catch(() =>
+            latest.current.report("收听时长保存失败，请检查本机存储"),
+          )
+          .finally(() => pendingStatistics.current.delete(write));
+        pendingStatistics.current.add(write);
+      },
     });
   const controller = engine.current;
   useEffect(() => {
@@ -128,6 +154,10 @@ export function usePlayer(
     start: (k: Knowledge, list?: Knowledge[]) => controller.start(k, list),
     prepareCached: (items: Knowledge[]) => controller.prepareCached(items),
     clearAudio: () => controller.clearAudio(),
+    flushListening: async () => {
+      await controller.save();
+      await Promise.all([...pendingStatistics.current]);
+    },
     skip: (direction: -1 | 1) => controller.skip(direction),
     toggle: () => controller.toggle(),
     seek: (time: number) => controller.seek(time),

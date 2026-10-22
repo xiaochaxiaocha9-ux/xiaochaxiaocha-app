@@ -1,5 +1,6 @@
 import { active, type Knowledge } from "./domain";
 import { audioKey } from "./db";
+import { ListeningMeter, type ListeningSession } from "./listening";
 
 export type PlaybackMode = "once" | "repeat" | "next";
 export const playbackModes: PlaybackMode[] = ["once", "repeat", "next"];
@@ -56,6 +57,7 @@ interface Dependencies {
   trackChanged(k: Knowledge): void;
   cached(): void;
   report(message: string): void;
+  listening?(session: ListeningSession): void;
 }
 
 /** Audio transitions live outside React so ended events and rapid skips can be tested. */
@@ -72,16 +74,37 @@ export class PlaybackController {
   private loadedKey = "";
   private lastSaved = 0;
   private disposed = false;
+  private meter: ListeningMeter;
   constructor(
     readonly audio: HTMLAudioElement,
     private deps: Dependencies,
   ) {
-    audio.onplay = () => this.update({ playing: true });
+    this.meter = new ListeningMeter((s) => this.deps.listening?.(s));
+    const beginListening = () => {
+      if (this.state.current && this.loadedKey === audioKey(this.state.current))
+        this.meter.begin(
+          this.state.current,
+          audio.currentTime,
+          audio.playbackRate,
+        );
+    };
+    audio.onplay = () => {
+      beginListening();
+      this.update({ playing: true });
+    };
+    audio.onplaying = beginListening;
+    audio.onwaiting = () => this.stopListening();
+    audio.onseeking = () =>
+      this.meter.anchor(audio.currentTime, audio.playbackRate);
+    audio.onseeked = () =>
+      this.meter.anchor(audio.currentTime, audio.playbackRate);
     audio.onpause = () => {
+      this.stopListening();
       this.update({ playing: false });
       void this.save();
     };
     audio.ontimeupdate = () => {
+      this.sampleListening();
       this.update({ time: audio.currentTime });
       if (Date.now() - this.lastSaved > 4000) {
         this.lastSaved = Date.now();
@@ -90,6 +113,7 @@ export class PlaybackController {
     };
     audio.onended = () => this.ended();
     audio.onerror = () => {
+      this.stopListening();
       this.update({ playing: false, loading: false });
       this.deps.report(
         this.audio.error?.code === 2
@@ -98,12 +122,30 @@ export class PlaybackController {
       );
     };
   }
+  private sampleListening() {
+    this.meter.sample(
+      this.audio.currentTime,
+      this.audio.duration,
+      this.audio.loop,
+      this.audio.playbackRate,
+    );
+  }
+  private stopListening() {
+    this.meter.stop(
+      this.audio.currentTime,
+      this.audio.duration,
+      this.audio.loop,
+      this.audio.playbackRate,
+    );
+  }
   private update(patch: Partial<PlaybackState>) {
     if (this.disposed) return;
     this.state = { ...this.state, ...patch };
     this.deps.changed(this.state);
   }
   async save() {
+    this.sampleListening();
+    this.meter.flush();
     const k = this.state.current;
     if (
       k &&
@@ -181,13 +223,16 @@ export class PlaybackController {
       });
   }
   changeSpeed(speed: number) {
+    this.sampleListening();
     this.audio.playbackRate = speed;
+    this.meter.anchor(this.audio.currentTime, speed);
     this.update({ speed });
   }
   async start(k: Knowledge, list = this.queue, resume = true) {
     if (this.disposed || !k.audio_path || !active(k)) return;
     const generation = ++this.generation;
     void this.save();
+    this.stopListening();
     this.audio.pause();
     this.audio.onloadedmetadata = null;
     this.queue = subjectPlaylist(
@@ -249,6 +294,7 @@ export class PlaybackController {
     if (next) void this.start(next, this.queue, false);
   }
   private ended() {
+    this.stopListening();
     this.audio.currentTime = 0;
     this.update({ playing: false, time: 0 });
     void this.save();
@@ -273,7 +319,9 @@ export class PlaybackController {
   }
   seek(time: number) {
     if (!Number.isFinite(this.audio.duration)) return;
+    this.sampleListening();
     this.audio.currentTime = Math.max(0, Math.min(time, this.audio.duration));
+    this.meter.anchor(this.audio.currentTime, this.audio.playbackRate);
     this.update({ time: this.audio.currentTime });
     void this.save();
   }
@@ -286,10 +334,16 @@ export class PlaybackController {
       this.audio.onended =
       this.audio.onerror =
       this.audio.onloadedmetadata =
+      this.audio.onplaying =
+      this.audio.onwaiting =
+      this.audio.onseeking =
+      this.audio.onseeked =
         null;
   }
   clearAudio() {
     void this.save();
+    this.stopListening();
+    this.meter.finish();
     ++this.generation;
     ++this.cacheEpoch;
     this.audio.pause();

@@ -58,6 +58,12 @@ import { exportBackup, restoreBackup } from "./backup";
 import { usePlayer } from "./player";
 import { PlaybackControls } from "./PlaybackControls";
 import { subjectPlaylist } from "./playback";
+import {
+  listeningSessions,
+  listeningTotals,
+  listeningTime,
+  type ListeningSession,
+} from "./listening";
 type Page = "home" | "subject" | "read" | "player" | "review" | "settings";
 const dateText = (s: string | Date) =>
   new Date(s).toLocaleString("zh-CN", {
@@ -86,6 +92,8 @@ export default function App() {
     [notice, setNotice] = useState(""),
     [search, setSearch] = useState(""),
     [filter, setFilter] = useState("all"),
+    [reviewSubject, setReviewSubject] = useState("all"),
+    [listening, setListening] = useState<ListeningSession[]>([]),
     [theme, setTheme] = useState("system"),
     [reviewMode, setReviewMode] = useState(false),
     [last, setLast] = useState<string>(),
@@ -103,12 +111,20 @@ export default function App() {
     downloadAbort = useRef<AbortController | null>(null),
     init = useRef(false);
   const report = (s: string) => setNotice(s);
+  const refreshStatistics = async () => setListening(await listeningSessions());
+  const chooseReviewSubject = (value: string) => {
+    setReviewSubject(value);
+    void putSetting("review-subject", value).catch(() =>
+      report("复习科目偏好未能保存"),
+    );
+  };
   const refresh = async () => {
     const data = await snapshot();
     setItems(data.items);
     setReviews(data.reviews);
     const db = await database();
     setCached(new Set(await db.getAllKeys("audio")));
+    await refreshStatistics();
   };
   const player = usePlayer(
     config,
@@ -124,6 +140,9 @@ export default function App() {
       void putSetting("last", k.key);
       if (selected !== k.key && (page === "read" || page === "player"))
         window.scrollTo(0, 0);
+    },
+    () => {
+      void refreshStatistics();
     },
   );
   const go = (p: Page) => {
@@ -141,7 +160,6 @@ export default function App() {
         p = "read";
       } else p = "home";
     }
-    if (p === "review") setFilter("all");
     location.hash = p;
     setPage(p);
     window.scrollTo(0, 0);
@@ -177,6 +195,15 @@ export default function App() {
             t = await setting("theme", "system"),
             savedToken = c.rememberToken ? await setting("token", "") : "";
           const lastKey = await setting<string | undefined>("last", undefined);
+          const savedReviewSubject = await setting(
+            "review-subject",
+            lastKey?.split("::")[1] || "all",
+          );
+          if (
+            savedReviewSubject === "all" ||
+            subjects.some((s) => s.id === savedReviewSubject)
+          )
+            setReviewSubject(savedReviewSubject);
           setConfig(c);
           setNamespace(ns);
           setToken(savedToken);
@@ -246,6 +273,7 @@ export default function App() {
     return () => clearInterval(tick);
   }, []);
   const visible = items.filter((k) => k.namespace === namespace && active(k)),
+    listeningStats = listeningTotals(listening, namespace),
     queue = dueQueue(visible, reviews),
     reviewMap = new Map(reviews.map((r) => [r.key, r])),
     current = items.find((k) => k.key === selected),
@@ -399,6 +427,7 @@ export default function App() {
     });
   const backup = () =>
     locked(async () => {
+      await player.flushListening();
       const data = JSON.stringify(await exportBackup(), null, 2),
         url = URL.createObjectURL(
           new Blob([data], { type: "application/json" }),
@@ -693,7 +722,10 @@ export default function App() {
                 <div className="section-heading">
                   <div>
                     <h2>我的四科</h2>
-                    <p>沿用原有学习体系，只带上已经学过的知识。</p>
+                    <p>
+                      累计收听 {listeningTime(listeningStats.total)} ·
+                      从本版本开始记录实际收听时间
+                    </p>
                   </div>
                   <span className="subtle">{visible.length} 个知识点</span>
                 </div>
@@ -722,6 +754,12 @@ export default function App() {
                           <span>{list.length} 个知识点</span>
                           <span className="due-dot">{count} 待复习</span>
                         </div>
+                        <p className="listening-small">
+                          累计收听{" "}
+                          {listeningTime(
+                            listeningStats.bySubject.get(s.id) || 0,
+                          )}
+                        </p>
                       </button>
                     );
                   })}
@@ -766,7 +804,11 @@ export default function App() {
                     <p className="eyebrow">{subjectInfo.en}</p>
                     <h1>{subjectInfo.name}</h1>
                     <p className="subtitle">
-                      按模块与章节自由浏览，也可以连续收听。
+                      累计收听{" "}
+                      {listeningTime(
+                        listeningStats.bySubject.get(subject) || 0,
+                      )}{" "}
+                      · 按模块与章节自由听读。
                     </p>
                   </div>
                 </div>
@@ -895,22 +937,28 @@ export default function App() {
                     </p>
                   </div>
                   <div className="count-label">
-                    {queue.length}
+                    {
+                      queue.filter(
+                        (k) =>
+                          reviewSubject === "all" ||
+                          k.subject === reviewSubject,
+                      ).length
+                    }
                     <small>待复习</small>
                   </div>
                 </div>
                 <div className="tabs">
                   <button
-                    className={filter === "all" ? "active" : ""}
-                    onClick={() => setFilter("all")}
+                    className={reviewSubject === "all" ? "active" : ""}
+                    onClick={() => chooseReviewSubject("all")}
                   >
                     全部
                   </button>
                   {subjects.map((s) => (
                     <button
                       key={s.id}
-                      className={filter === s.id ? "active" : ""}
-                      onClick={() => setFilter(s.id)}
+                      className={reviewSubject === s.id ? "active" : ""}
+                      onClick={() => chooseReviewSubject(s.id)}
                     >
                       {s.name}
                     </button>
@@ -918,7 +966,8 @@ export default function App() {
                 </div>
                 {(() => {
                   const list = queue.filter(
-                    (k) => filter === "all" || k.subject === filter,
+                    (k) =>
+                      reviewSubject === "all" || k.subject === reviewSubject,
                   );
                   return list.length ? (
                     <>
@@ -976,6 +1025,12 @@ export default function App() {
                           : "已学内容派生资料"}
                       </span>
                       <span>修订 {current.learning_revision}</span>
+                      <span>
+                        累计收听{" "}
+                        {listeningTime(
+                          listeningStats.byCard.get(current.key) || 0,
+                        )}
+                      </span>
                       {current.source_node_id && (
                         <span>原教学节点 {current.source_node_id}</span>
                       )}
@@ -1290,7 +1345,7 @@ export default function App() {
                     }}
                   />
                   <p className="help">
-                    备份包括阅读资料、复习历史和播放位置，不含令牌及
+                    备份包括阅读资料、复习历史、播放位置和累计收听时长，不含令牌及
                     MP3。恢复按时间合并；音频可重新下载。
                   </p>
                   <div className="settings-divider" />
@@ -1370,7 +1425,7 @@ export default function App() {
                     </select>
                   </label>
                   <small className="help">
-                    随身听 v0.2.1 · 数据结构 v1 · 本地优先
+                    随身听 v0.2.2 · 数据结构 v1 · 本地优先
                   </small>
                 </section>
               </>
@@ -1420,7 +1475,6 @@ export default function App() {
             key={n.id}
             className={page === n.id ? "chosen" : ""}
             onClick={() => {
-              if (n.id === "review") setFilter("all");
               go(n.id);
             }}
           >

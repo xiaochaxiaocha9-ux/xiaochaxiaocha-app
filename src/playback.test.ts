@@ -74,6 +74,7 @@ function setup() {
     trackChanged: vi.fn(),
     cached: vi.fn(),
     report: vi.fn(),
+    listening: vi.fn(),
   };
   const player = new PlaybackController(
     audio as unknown as HTMLAudioElement,
@@ -82,6 +83,35 @@ function setup() {
   return { player, audio, deps };
 }
 describe("inline audio playback", () => {
+  it("records actual progress and excludes manual seeking in the audio controller", async () => {
+    let now = 0;
+    const timer = vi.spyOn(performance, "now").mockImplementation(() => now);
+    const { player, audio, deps } = setup();
+    try {
+      await player.start(card("A")); // resumes at 12, which is not counted
+      now = 1000;
+      audio.currentTime = 13;
+      audio.ontimeupdate?.();
+      now = 2000;
+      audio.currentTime = 14;
+      player.seek(25);
+      now = 3000;
+      audio.currentTime = 26;
+      audio.ontimeupdate?.();
+      audio.pause();
+      expect(deps.listening).toHaveBeenLastCalledWith(
+        expect.objectContaining({ seconds: 3, knowledge_id: "A" }),
+      );
+      now = 13000;
+      audio.ontimeupdate?.();
+      expect(deps.listening).toHaveBeenLastCalledWith(
+        expect.objectContaining({ seconds: 3 }),
+      );
+    } finally {
+      player.dispose();
+      timer.mockRestore();
+    }
+  });
   it("builds an ordered subject-only playlist across chapters and modules", () => {
     const first = card("POL-1.1-K01"),
       second = card("POL-1.1-K02", { order: 2, chapter: "第二章" });
