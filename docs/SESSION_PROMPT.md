@@ -36,6 +36,8 @@
 
 先读`docs/PUBLISHING.md`和`schemas/content-job.schema.json`，查询现有条目，严格沿用实际协议。
 
+同时遵守`docs/CONTENT_PROTOCOL.md`的跨发布端约定。learning_state最多160个UTF-16单位；content_hash是记录版本令牌，不能当正文校验；本机锁不保护独立API发布端。不要批量归一化旧哈希或补造英语/数学父级。
+
 - module_id：原模块分组，例如POL-1.4或ENV-1.1；已发布条目保持不变。
 - source_node_id：原教学节点，例如POL-1.4.1。
 - knowledge_id：派生小知识点，例如POL-1.4.1-K01、K02。子编号仅属于软件，不反过来重编号主模型。

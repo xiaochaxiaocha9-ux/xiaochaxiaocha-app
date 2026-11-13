@@ -127,6 +127,15 @@ class PublisherTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Duplicate'):
             publish.enqueue(self.c, {'schema_version': 1, 'items': [sample(), sample()]})
 
+    def test_learning_state_limits_match_browser_utf16_length_before_enqueue(self):
+        publish.validate(sample(learning_state='已'*160))
+        publish.validate(sample(learning_state='😀'*80))
+        with self.assertRaisesRegex(ValueError, 'learning_state length 162'):
+            publish.enqueue(self.c, sample(learning_state='😀'*81))
+        with self.assertRaisesRegex(ValueError, 'learning_state length 167'):
+            publish.enqueue(self.c, sample(learning_state='已'*167))
+        self.assertFalse((self.c['queue_dir']/'pending').exists())
+
     def test_failed_batch_is_atomic_and_does_not_block_another_subject(self):
         # The second item fails after the first has generated an asset in staging.
         jid = publish.enqueue(self.c, {'schema_version': 1, 'items': [sample(), sample(knowledge_id='1.1.2', expected_content_hash='a'*64)]})
@@ -226,5 +235,49 @@ class PublisherTests(unittest.TestCase):
         publish.git(self.c, 'commit', '-m', 'Reviewed local generated materials')
         asyncio.run(publish.process(self.c, True))
         self.assertEqual(publish.git(self.c, 'rev-list', '--count', '@{upstream}..HEAD'), '0')
+
+    def test_reviewed_stale_manifest_is_blocked_before_it_can_roll_back_remote(self):
+        self.init_git_remote()
+        publish.enqueue(self.c, sample());asyncio.run(publish.process(self.c, True))
+        original = publish.load(self.c['content_repo']/'manifest.json')
+        publish.enqueue(self.c, sample(job_id='next', reading_content='修订正文', change='substantive', expected_content_hash=original['items'][0]['content_hash']))
+        asyncio.run(publish.process(self.c, True))
+        remote_before = publish.git(self.c,'rev-parse','@{upstream}')
+        # An API-like writer attaches stale content to a fresh parent commit.
+        publish.write_manifest(self.c, original)
+        publish.git(self.c,'add','manifest.json');publish.git(self.c,'commit','-m','Stale full manifest fixture')
+        with self.assertRaisesRegex(ValueError,'rolled back'):
+            asyncio.run(publish.process(self.c, True))
+        self.assertEqual(publish.git(self.c,'rev-parse','@{upstream}'), remote_before)
+        self.assertEqual(publish.manifest_at(self.c,'@{upstream}')['items'][0]['learning_revision'],2)
+
+    def test_external_publish_during_tts_stops_our_transaction_without_overwriting(self):
+        self.init_git_remote()
+        publish.enqueue(self.c, sample());asyncio.run(publish.process(self.c, True))
+        other = Path(self.temp.name)/'other'
+        subprocess.run(['git','clone',str(Path(self.temp.name)/'remote.git'),str(other)],check=True,capture_output=True)
+        other_c = {**self.c, 'content_repo': other}
+        publish.git(other_c,'config','user.name','Other publisher')
+        publish.git(other_c,'config','user.email','other@example.invalid')
+        class ArrivingPublisher(FakeTTS):
+            async def generate(engine, text, target, options):
+                await super().generate(text,target,options)
+                foreign = publish.load(other/'manifest.json')
+                item = foreign['items'][0]
+                item.update(learning_revision=2, content_hash='d'*64)
+                publish.write_manifest(other_c,foreign)
+                publish.git(other_c,'add','manifest.json')
+                publish.git(other_c,'commit','-m','Concurrent publication')
+                publish.git(other_c,'push')
+        jid = publish.enqueue(self.c, sample(subject='english', module_id='EN', knowledge_id='EN-DEMO-01', listening_content='A reviewed listening unit'))
+        engine = ArrivingPublisher()
+        with patch('publish.TTS',return_value=engine):
+            with self.assertRaisesRegex(ValueError,'outside declared publication scope'):
+                asyncio.run(publish.process(self.c,True))
+        self.assertEqual(publish.job_status(self.c,jid),'pending')
+        self.assertTrue((self.c['queue_dir']/'transaction.json').exists())
+        self.assertEqual(len(publish.manifest_at(self.c,'@{upstream}')['items']),1)
+        self.assertEqual(publish.manifest_at(self.c,'@{upstream}')['items'][0]['learning_revision'],2)
+        self.assertEqual(publish.git(self.c,'status','--porcelain'),'')
 
 if __name__=='__main__':unittest.main()

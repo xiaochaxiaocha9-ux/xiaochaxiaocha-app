@@ -14,6 +14,7 @@ import {
 import { exportBackup, restoreBackup } from "./backup";
 import { syncContent, cacheAudio, clearAudioCache } from "./github";
 import { downloadAudioLibrary } from "./audio-download";
+import contractCases from "../tests/fixtures/manifest-validation-cases.json";
 const now = new Date("2026-10-18T08:00:00Z");
 const ns = "me/study/manifest.json";
 const entry = async (id = "1.1.1"): Promise<Knowledge> => ({
@@ -303,6 +304,41 @@ describe("audio download and removal", () => {
 });
 
 describe("derived memory units", () => {
+  it.each(contractCases)(
+    "shares the publication contract: $name",
+    async (testCase) => {
+      const k = { ...(await entry()), ...testCase.patch };
+      if (testCase.state)
+        Object.assign(k, {
+          learning_state: testCase.state.text.repeat(testCase.state.count),
+        });
+      const validate = () => validateManifest(manifest(k as Knowledge));
+      if (testCase.valid) expect(validate).not.toThrow();
+      else expect(validate).toThrow();
+    },
+  );
+  it("reports the exact card, field, limit and actual length without blaming the revision", async () => {
+    const k = {
+      ...(await entry("EN-DEMO-01")),
+      subject: "english" as const,
+      learning_revision: 2,
+      learning_state: "已".repeat(167),
+    };
+    expect(() => validateManifest(manifest(k))).toThrow(
+      /english\/EN-DEMO-01.*learning_state.*167.*160/,
+    );
+    expect(() =>
+      validateManifest(manifest({ ...k, learning_state: "已讲，待检查" })),
+    ).not.toThrow();
+  });
+  it("accepts different content and reading hashes and IDs shared across subjects", async () => {
+    const math = await entry(),
+      english = { ...math, subject: "english" as const };
+    expect(math.content_hash).not.toBe(math.reading_hash);
+    expect(() =>
+      validateManifest({ ...manifest(math), items: [math, english] }),
+    ).not.toThrow();
+  });
   it("downloads three newly published politics cards on manual sync and retains existing reviews", async () => {
     const old = await entry();
     await commitContent(ns, [old]);

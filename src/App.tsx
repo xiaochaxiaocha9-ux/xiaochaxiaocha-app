@@ -1425,7 +1425,7 @@ export default function App() {
                     </select>
                   </label>
                   <small className="help">
-                    随身听 v0.2.2 · 数据结构 v1 · 本地优先
+                    随身听 v0.2.3 · 数据结构 v1 · 本地优先
                   </small>
                 </section>
               </>

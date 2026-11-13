@@ -1,0 +1,75 @@
+[
+  {
+    "name": "english root without parent",
+    "valid": true,
+    "patch": { "subject": "english", "knowledge_id": "EN-DEMO-01" }
+  },
+  { "name": "math root without parent", "valid": true, "patch": {} },
+  {
+    "name": "self parent",
+    "valid": true,
+    "patch": { "knowledge_id": "EN-DEMO-01", "source_node_id": "EN-DEMO-01" }
+  },
+  {
+    "name": "matching child parent",
+    "valid": true,
+    "patch": { "knowledge_id": "POL-1.4.1-K01", "source_node_id": "POL-1.4.1" }
+  },
+  {
+    "name": "wrong child parent",
+    "valid": false,
+    "patch": { "knowledge_id": "POL-1.4.1-K01", "source_node_id": "POL-1.4.2" }
+  },
+  {
+    "name": "160 Chinese units",
+    "valid": true,
+    "patch": {},
+    "state": { "text": "已", "count": 160 }
+  },
+  {
+    "name": "161 Chinese units",
+    "valid": false,
+    "patch": {},
+    "state": { "text": "已", "count": 161 }
+  },
+  {
+    "name": "reported 167 units",
+    "valid": false,
+    "patch": {},
+    "state": { "text": "已", "count": 167 }
+  },
+  {
+    "name": "80 emoji 160 UTF16 units",
+    "valid": true,
+    "patch": {},
+    "state": { "text": "😀", "count": 80 }
+  },
+  {
+    "name": "81 emoji 162 UTF16 units",
+    "valid": false,
+    "patch": {},
+    "state": { "text": "😀", "count": 81 }
+  },
+  { "name": "empty state", "valid": false, "patch": { "learning_state": "" } },
+  {
+    "name": "null source",
+    "valid": false,
+    "patch": { "source_node_id": null }
+  },
+  {
+    "name": "boolean schema",
+    "valid": false,
+    "patch": { "schema_version": true }
+  },
+  { "name": "boolean order", "valid": false, "patch": { "order": true } },
+  {
+    "name": "fractional revision",
+    "valid": false,
+    "patch": { "learning_revision": 1.5 }
+  },
+  {
+    "name": "integer serialized as float",
+    "valid": true,
+    "patch": { "learning_revision": 1.0 }
+  }
+]

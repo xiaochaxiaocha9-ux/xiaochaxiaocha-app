@@ -119,7 +119,9 @@ export async function syncContent(
       (prev.module_id !== e.module_id ||
         e.learning_revision < prev.learning_revision)
     )
-      throw Error("远端更改了稳定模块 ID 或回退内容修订号，请在发布端检查");
+      throw Error(
+        `${e.subject}/${e.knowledge_id}：远端更改了稳定模块 ID 或回退内容修订号（本机 ${prev.learning_revision} → 远端 ${e.learning_revision}），请在发布端检查`,
+      );
     let reading = prev?.reading || "";
     if (
       e.status === "active" &&

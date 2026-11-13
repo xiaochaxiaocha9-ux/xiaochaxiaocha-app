@@ -143,24 +143,33 @@ export function validateManifest(value: unknown): Manifest {
         (!safePath(e.listening_path) || !hash(e.listening_hash)))
     )
       throw Error("附件格式无效");
+    const entryName = `${e.subject}/${e.knowledge_id}`;
     if (
-      (e.source_node_id !== undefined &&
-        (typeof e.source_node_id !== "string" ||
-          !e.source_node_id ||
-          e.source_node_id.length >= 200 ||
-          (e.knowledge_id !== e.source_node_id &&
-            (!e.knowledge_id.startsWith(e.source_node_id + "-K") ||
-              !/^\d{2,}$/.test(
-                e.knowledge_id.slice(e.source_node_id.length + 2),
-              ))))) ||
-      (e.learning_state !== undefined &&
-        (typeof e.learning_state !== "string" ||
-          !e.learning_state ||
-          e.learning_state.length > 160))
+      e.source_node_id !== undefined &&
+      (typeof e.source_node_id !== "string" ||
+        !e.source_node_id ||
+        e.source_node_id.length >= 200 ||
+        (e.knowledge_id !== e.source_node_id &&
+          (!e.knowledge_id.startsWith(e.source_node_id + "-K") ||
+            !/^\d{2,}$/.test(
+              e.knowledge_id.slice(e.source_node_id.length + 2),
+            ))))
     )
-      throw Error("来源节点或原始学习状态无效");
+      throw Error(
+        `${entryName}：来源节点 source_node_id 无效，须等于本卡 ID 或其 -K01 形式的父节点`,
+      );
+    if (
+      e.learning_state !== undefined &&
+      (typeof e.learning_state !== "string" ||
+        !e.learning_state ||
+        e.learning_state.length > 160)
+    )
+      throw Error(
+        `${entryName}：learning_state 长度为 ${typeof e.learning_state === "string" ? e.learning_state.length : "非文本"}，须为1—160个UTF-16单位；详细说明请放入source_note`,
+      );
     const id = e.subject + "::" + e.knowledge_id;
-    if (ids.has(id)) throw Error("资料存在重复知识点 ID");
+    if (ids.has(id))
+      throw Error(`${entryName}：资料存在重复知识点 ID（科目内唯一）`);
     ids.add(id);
   }
   return m;

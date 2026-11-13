@@ -53,6 +53,7 @@
         "listening_content": { "type": "string", "maxLength": 50000 },
         "learning_state": {
           "type": "string",
+          "description": "Semantic limit: 1-160 UTF-16 code units, matching JS String.length. Detailed notes belong in source_note; Python publisher enforces UTF-16 in addition to this schema's Unicode-character maxLength.",
           "minLength": 1,
           "maxLength": 160
         },

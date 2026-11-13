@@ -18,6 +18,7 @@ import tempfile
 import time
 import uuid
 from contextlib import contextmanager
+from content_contract import utf16_length, validate_manifest, validate_transition, check_files
 
 SUBJECTS = {'politics', 'english', 'math', 'environment'}
 PUBLIC_ROOT = Path(__file__).resolve().parents[1]
@@ -54,24 +55,25 @@ def configured(args):
     return c
 
 def validate(job):
-    if not isinstance(job, dict) or job.get('schema_version') != 1:
+    if not isinstance(job, dict) or type(job.get('schema_version')) not in (int, float) or job.get('schema_version') != 1:
         raise ValueError('schema_version must be 1')
     for key in ['module_id', 'module_title', 'knowledge_id', 'title', 'chapter']:
-        if not isinstance(job.get(key), str) or not 0 < len(job[key]) < 500:
+        if not isinstance(job.get(key), str) or not 0 < utf16_length(job[key]) < 500:
             raise ValueError('Missing or invalid field: ' + key)
     if not isinstance(job.get('subject'), str) or job['subject'] not in SUBJECTS:
         raise ValueError('Unknown subject')
     source = job.get('source_node_id')
     if source is not None:
         prefix = {'politics': 'POL-', 'environment': 'ENV-'}.get(job['subject'], '')
-        if not isinstance(source, str) or not 0 < len(source) < 200 or (prefix and not source.startswith(prefix)):
+        if not isinstance(source, str) or not 0 < utf16_length(source) < 200 or (prefix and not source.startswith(prefix)):
             raise ValueError('source_node_id must identify the original teaching node of this subject')
-        if job['knowledge_id'] != source and not re.fullmatch(re.escape(source) + r'-K\d{2,}', job['knowledge_id']):
+        if job['knowledge_id'] != source and not re.fullmatch(re.escape(source) + r'-K[0-9]{2,}', job['knowledge_id']):
             raise ValueError('knowledge_id must retain source_node_id or use its stable -K01 style child ID')
-    elif re.search(r'-K\d+$', job['knowledge_id']):
+    elif re.search(r'-K[0-9]+$', job['knowledge_id']):
         raise ValueError('Derived child IDs require source_node_id')
-    if 'learning_state' in job and (not isinstance(job['learning_state'], str) or not 0 < len(job['learning_state']) <= 160):
-        raise ValueError('learning_state must be a short factual source-state description, not an FSRS rating')
+    if 'learning_state' in job and (not isinstance(job['learning_state'], str) or not 0 < utf16_length(job['learning_state']) <= 160):
+        actual = utf16_length(job['learning_state']) if isinstance(job['learning_state'], str) else 'non-string'
+        raise ValueError(f"{job['subject']}/{job['knowledge_id']}: learning_state length {actual}; expected 1-160 UTF-16 units; put detailed notes in source_note")
     if 'source_notes' in job:
         raise ValueError('Use source_note (singular), as required by this publisher')
     if not isinstance(job.get('order', 0), (int, float)) or isinstance(job.get('order', 0), bool) or not math.isfinite(job.get('order', 0)):
@@ -101,7 +103,7 @@ def validate(job):
 
 def payload_items(payload):
     if isinstance(payload, dict) and 'items' in payload:
-        if payload.get('schema_version') != 1 or not isinstance(payload['items'], list) or not 1 <= len(payload['items']) <= 100:
+        if type(payload.get('schema_version')) not in (int, float) or payload.get('schema_version') != 1 or not isinstance(payload['items'], list) or not 1 <= len(payload['items']) <= 100:
             raise ValueError('A v1 batch must contain 1-100 items')
         items = payload['items']
     else:
@@ -261,6 +263,7 @@ def write_manifest(c, manifest):
     manifest['revision'] = digest(canonical(manifest['items']))
     from datetime import datetime, timezone
     manifest['generated_at'] = datetime.now(timezone.utc).isoformat()
+    validate_manifest(manifest)
     atomic(c['content_repo'] / 'manifest.json', canonical(manifest))
 
 def git(c, *args, preserve=False):
@@ -320,6 +323,16 @@ def remove_stage(c, stage):
         raise ValueError('Refusing to clean a staging path outside the publisher queue')
     shutil.rmtree(stage)
 
+def manifest_at(c, ref):
+    if not git(c, 'ls-tree', '--name-only', ref, '--', 'manifest.json'):
+        return {'items': []}
+    return json.loads(git(c, 'show', ref + ':manifest.json'))
+
+def guard_remote_transition(c, candidate, scope=None):
+    # Local locks do not cover another computer or an API publisher.
+    git(c, 'fetch', 'origin')
+    validate_transition(manifest_at(c, '@{upstream}'), candidate, scope)
+
 def finish_transaction(c):
     marker = c['queue_dir'] / 'transaction.json'
     transaction = load(marker)
@@ -340,6 +353,12 @@ def finish_transaction(c):
             raise ValueError('Git history changed during publication; inspect before retrying')
         if git(c, 'show', 'HEAD:manifest.json') != (stage / 'manifest.json').read_text(encoding='utf-8').strip():
             raise ValueError('Saved transaction does not match the current Git commit')
+    candidate = load(stage / 'manifest.json')
+    scope = transaction.get('scope')
+    if scope is None:
+        # Older interrupted transactions retain their original base commit.
+        scope = validate_transition(manifest_at(c, transaction['base_head']), candidate)
+    guard_remote_transition(c, candidate, {tuple(key) for key in scope})
     copy_stage(c, stage, files)
     git(c, 'add', '--', *files)
     if git(c, 'diff', '--cached', '--name-only'):
@@ -376,6 +395,8 @@ async def process(c, push=False, wait_seconds=0):
                 break
             stage = Path(tempfile.mkdtemp(prefix='stage-', dir=c['queue_dir']))
             stage_config = {**c, 'content_repo': stage, '_existing_repo': c['content_repo']}
+            baseline = copy.deepcopy(manifest)
+            scope = set()
             successful = []
             reports = {}
             try:
@@ -400,6 +421,7 @@ async def process(c, push=False, wait_seconds=0):
                                 c['_report']['updated'] += 1
                                 counts['updated'] += 1
                         manifest = trial
+                        scope.update((item['subject'], item['knowledge_id']) for item in items)
                         successful.append(job_path.name)
                         reports[job_path.name] = counts
                         c['_report']['published_items'] += len(items)
@@ -409,9 +431,10 @@ async def process(c, push=False, wait_seconds=0):
                         atomic(c['queue_dir'] / 'errors' / job_path.name, canonical({'error': message}))
                 if successful:
                     write_manifest(stage_config, manifest)
+                    validate_transition(baseline, manifest, scope)
                     files = staged_files(stage, manifest)
                     if push:
-                        atomic(marker, canonical({'stage': stage.name, 'files': files, 'pending': successful, 'reports': reports, 'base_head': git(c, 'rev-parse', 'HEAD')}))
+                        atomic(marker, canonical({'stage': stage.name, 'files': files, 'pending': successful, 'reports': reports, 'scope': sorted(scope), 'base_head': git(c, 'rev-parse', 'HEAD')}))
                         finish_transaction(c)
                     else:
                         copy_stage(c, stage, files)
@@ -421,6 +444,7 @@ async def process(c, push=False, wait_seconds=0):
                     remove_stage(c, stage)
         # Also preserve the maintenance route: local generate -> user-reviewed commit -> push.
         if push and git(c, 'rev-list', '--count', '@{upstream}..HEAD') != '0':
+            guard_remote_transition(c, load(c['content_repo'] / 'manifest.json'))
             git(c, 'push')
         return c['_report']['published_items']
 
@@ -465,10 +489,16 @@ def main():
     s = commands.add_parser('submit');s.add_argument('input',type=Path);s.add_argument('--push',action='store_true');s.add_argument('--wait',type=float,default=120)
     status = commands.add_parser('status');status.add_argument('job_id')
     catalog = commands.add_parser('catalog');catalog.add_argument('--subject',required=True,choices=sorted(SUBJECTS));catalog.add_argument('--node')
+    check = commands.add_parser('check-manifest',help='Read-only preflight; no config, TTS or Git login needed')
+    check.add_argument('manifest',type=Path);check.add_argument('--base',type=Path)
+    check.add_argument('--change',action='append',default=[]);check.add_argument('--root',type=Path)
     commands.add_parser('init')
     m = commands.add_parser('merge-chapter');m.add_argument('--subject',required=True,choices=sorted(SUBJECTS));m.add_argument('--module',required=True);m.add_argument('--chapter',required=True);m.add_argument('--output',required=True)
     args = parser.parse_args()
     try:
+        if args.command=='check-manifest':
+            print(json.dumps(check_files(args.manifest,args.base,args.change,args.root),ensure_ascii=False))
+            return 0
         c = configured(args)
         if args.command=='init':
             c['content_repo'].mkdir(parents=True,exist_ok=True)
