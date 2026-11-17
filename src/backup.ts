@@ -93,7 +93,10 @@ export async function restoreBackup(input: unknown) {
       !validCard(r.card) ||
       !time(r.updated_at) ||
       !Number.isSafeInteger(r.revision) ||
-      r.revision < 1
+      r.revision < 1 ||
+      (r.practice !== undefined && (!r.practice ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(r.practice.day) ||
+        ![0, 1, 2].includes(r.practice.remaining) || !time(r.practice.ready_at)))
     )
       throw Error("备份复习记录无效");
   for (const e of b.events)

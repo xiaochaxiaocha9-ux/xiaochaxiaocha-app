@@ -54,3 +54,8 @@ python tools/content_contract.py candidate.json --base base.json --change englis
 检查器仅使用Python标准库。它是离线预检，**不是远端锁，也不会替上传工具自动执行条件提交**。非本机发布端若无法运行，应按此协议实现等价检查或把差量交给统一发布器，不能假称受到保护。
 
 Python与手机共用`tests/fixtures/manifest-validation-cases.json`边界样例，防止两端再次对长度、父节点或类型产生不同解释。作业JSON Schema里的`maxLength`按Unicode字符定义，只做基础校验，不能替代这里的UTF-16语义与跨字段检查。
+
+
+## 阅读正文遮挡（v0.3）
+
+正文可选使用 `{{回忆内容}}` 标记，名词线索留在外面。仅修改排版时沿用原ID和learning_revision，仍更新正文与版本哈希；听觉版不加标记、未改时复用MP3。详细边界及给Muse的提示词见[遮挡约定](RECALL_MASKS.md)。不新增清单字段，不自动改写历史卡库。

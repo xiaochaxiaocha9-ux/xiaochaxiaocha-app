@@ -1,8 +1,6 @@
 import {
   Play,
   Pause,
-  SkipBack,
-  SkipForward,
   RefreshCw,
   Repeat,
   ListMusic,
@@ -53,22 +51,6 @@ export function PlaybackControls({
               : selected
                 ? "继续播放"
                 : "收听本节"}
-        </button>
-        <button
-          className="audio-icon"
-          aria-label="上一小节"
-          disabled={!selected || !player.hasPrevious}
-          onClick={() => player.skip(-1)}
-        >
-          <SkipBack size={20} />
-        </button>
-        <button
-          className="audio-icon"
-          aria-label="下一小节"
-          disabled={!selected || !player.hasNext}
-          onClick={() => player.skip(1)}
-        >
-          <SkipForward size={20} />
         </button>
         <button
           className="audio-mode"

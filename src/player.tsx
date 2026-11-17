@@ -151,7 +151,7 @@ export function usePlayer(
   }, [state.playing, state.time, state.duration, state.speed]);
   return {
     ...state,
-    start: (k: Knowledge, list?: Knowledge[]) => controller.start(k, list),
+    start: (k: Knowledge, list?: Knowledge[]) => controller.start(k, list, true, true),
     prepareCached: (items: Knowledge[]) => controller.prepareCached(items),
     clearAudio: () => controller.clearAudio(),
     flushListening: async () => {

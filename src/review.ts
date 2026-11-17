@@ -1,7 +1,8 @@
 import { createEmptyCard, fsrs, Rating, type Card } from "ts-fsrs";
 import { database } from "./db";
-import type { Knowledge, Review } from "./domain";
-const scheduler = fsrs({ request_retention: 0.9, enable_fuzz: false });
+import { MAX_REVIEW_DAYS, type Knowledge, type Review } from "./domain";
+import { advancePractice } from "./study";
+const scheduler = fsrs({ request_retention: 0.95, maximum_interval: MAX_REVIEW_DAYS, enable_fuzz: false });
 export const reviveCard = (c: Card): Card => ({
   ...c,
   due: new Date(c.due),
@@ -22,6 +23,10 @@ export function schedule(
     now,
     rating === 1 ? Rating.Again : Rating.Good,
   );
+  // FSRS may enforce an interval progression floor on mature imported cards.
+  // Apply our exam-preparation horizon explicitly as well as via its parameter.
+  next.card.due = new Date(Math.min(next.card.due.getTime(), now.getTime() + MAX_REVIEW_DAYS * 86400000));
+  next.card.scheduled_days = Math.min(next.card.scheduled_days, MAX_REVIEW_DAYS);
   return {
     key: k.key,
     card: next.card,
@@ -46,7 +51,19 @@ export async function rate(
     await tx.done;
     return false;
   }
+  if (previous?.revision === k.learning_revision && previous.practice?.remaining &&
+    Date.parse(previous.practice.ready_at) > now.getTime()) {
+    await tx.done;
+    return false;
+  }
   const next = schedule(previous, k, rating, now);
+  next.practice = advancePractice(previous?.revision === k.learning_revision ? previous.practice : undefined, rating, now);
+  // Same-day reinforcement and long-term scheduling have distinct responsibilities.
+  next.card.due = next.practice.remaining
+    ? new Date(next.practice.ready_at)
+    : new Date(Math.min(now.getTime() + MAX_REVIEW_DAYS * 86400000,
+      Math.max(now.getTime() + 86400000, next.card.due.getTime())));
+  next.card.scheduled_days = Math.floor((next.card.due.getTime() - now.getTime()) / 86400000);
   await tx.objectStore("reviews").put(next);
   await tx
     .objectStore("events")

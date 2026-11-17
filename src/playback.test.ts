@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { PlaybackController, subjectPlaylist } from "./playback";
+import { PlaybackController, subjectPlaylist, shuffledPlaylist } from "./playback";
 import { keyOf, type Knowledge } from "./domain";
 
 const card = (id: string, overrides: Partial<Knowledge> = {}): Knowledge => {
@@ -83,6 +83,25 @@ function setup() {
   return { player, audio, deps };
 }
 describe("inline audio playback", () => {
+  it("shuffles audio once per session, keeps the current card first, and retains that order across transitions", async () => {
+    const a = card("A"), b = card("B"), c = card("C");
+    const list = [a, b, c, card("ENV", { subject: "environment" }), card("other", { namespace: "other" })];
+    expect(shuffledPlaylist(list, a, () => 0).map(k => k.knowledge_id)).toEqual(["A", "C", "B"]);
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    const { player, audio } = setup();
+    try {
+      player.setMode("next");
+      await player.start(a, list, false, true);
+      audio.finish();
+      await vi.waitFor(() => expect(player.state.loading).toBe(false));
+      expect(player.state.current?.key).toBe(c.key);
+      audio.finish();
+      await vi.waitFor(() => expect(player.state.loading).toBe(false));
+      expect(player.state.current?.key).toBe(b.key);
+      audio.finish();
+      expect(player.state.hasNext).toBe(false);
+    } finally { player.dispose(); random.mockRestore(); }
+  });
   it("records actual progress and excludes manual seeking in the audio controller", async () => {
     let now = 0;
     const timer = vi.spyOn(performance, "now").mockImplementation(() => now);

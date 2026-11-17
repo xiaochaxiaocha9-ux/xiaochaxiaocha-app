@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   BookOpen,
   Headphones,
@@ -9,8 +9,6 @@ import {
   ArrowLeft,
   ChevronRight,
   Play,
-  Pause,
-  SkipForward,
   Download,
   RefreshCw,
   Search,
@@ -21,17 +19,13 @@ import {
   Sun,
   Leaf,
   CheckCircle2,
-  RotateCcw,
-  Plus,
   ShieldCheck,
   FileDown,
   Upload,
-  X,
 } from "lucide-react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
+import { RecallActions, type RecallPhase } from "./RecallActions";
+import { Toast } from "./Toast";
+import { pickNext, readyToStudy } from "./study";
 import { database, snapshot, setting, putSetting, audioKey } from "./db";
 import {
   subjects,
@@ -40,6 +34,7 @@ import {
   active,
   due,
   dueQueue,
+  reviewDue,
   type Config,
   type Knowledge,
   type Review,
@@ -65,6 +60,7 @@ import {
   type ListeningSession,
 } from "./listening";
 type Page = "home" | "subject" | "read" | "player" | "review" | "settings";
+const MaskedMarkdown = lazy(() => import("./MaskedMarkdown").then(m => ({ default: m.MaskedMarkdown })));
 const dateText = (s: string | Date) =>
   new Date(s).toLocaleString("zh-CN", {
     month: "long",
@@ -72,10 +68,6 @@ const dateText = (s: string | Date) =>
     hour: "2-digit",
     minute: "2-digit",
   });
-const clock = (t: number) =>
-  Number.isFinite(t)
-    ? `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`
-    : "0:00";
 export default function App() {
   const [page, setPage] = useState<Page>("home"),
     [subject, setSubject] = useState("politics"),
@@ -89,6 +81,8 @@ export default function App() {
     [ready, setReady] = useState(false),
     [busy, setBusy] = useState(false),
     [rating, setRating] = useState(false),
+    [recallPhase, setRecallPhase] = useState<RecallPhase>("hidden"),
+    [tick, setTick] = useState(Date.now()),
     [notice, setNotice] = useState(""),
     [search, setSearch] = useState(""),
     [filter, setFilter] = useState("all"),
@@ -107,9 +101,14 @@ export default function App() {
     [updateReady, setUpdateReady] = useState(false);
   const file = useRef<HTMLInputElement>(null),
     ratingLock = useRef(false),
+    advanceLock = useRef(false),
+    attemptId = useRef(""),
+    contentRef = useRef<string | undefined>(undefined),
     busyLock = useRef(false),
     downloadAbort = useRef<AbortController | null>(null),
-    init = useRef(false);
+    init = useRef(false),
+    selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const report = (s: string) => setNotice(s);
   const refreshStatistics = async () => setListening(await listeningSessions());
   const chooseReviewSubject = (value: string) => {
@@ -134,6 +133,10 @@ export default function App() {
       void refresh();
     },
     (k) => {
+      if (selected !== k.key) {
+        setRecallPhase("hidden");
+        attemptId.current = crypto.randomUUID();
+      }
       setSelected(k.key);
       setSubject(k.subject);
       setLast(k.key);
@@ -154,17 +157,20 @@ export default function App() {
           (x) => x.namespace === namespace && active(x) && x.audio_path,
         );
       if (k) {
+        setRecallPhase("hidden");
         setSelected(k.key);
         setSubject(k.subject);
         setReviewMode(false);
         p = "read";
-      } else p = "home";
+      } else p = "review";
     }
     location.hash = p;
     setPage(p);
     window.scrollTo(0, 0);
   };
   const open = (k: Knowledge, mode = false) => {
+    attemptId.current = crypto.randomUUID();
+    setRecallPhase("hidden");
     setSelected(k.key);
     setSubject(k.subject);
     setReviewMode(mode);
@@ -268,18 +274,28 @@ export default function App() {
   }, [theme]);
   useEffect(() => {
     const tick = setInterval(() => {
-      setReviews((r) => [...r]);
-    }, 60000);
+      setTick(Date.now());
+    }, 1000);
     return () => clearInterval(tick);
   }, []);
-  const visible = items.filter((k) => k.namespace === namespace && active(k)),
-    listeningStats = listeningTotals(listening, namespace),
-    queue = dueQueue(visible, reviews),
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(""), 8500);
+    return () => clearTimeout(timer);
+  }, [notice]);
+  const visible = useMemo(() => items.filter((k) => k.namespace === namespace && active(k)), [items, namespace]),
+    listeningStats = useMemo(() => listeningTotals(listening, namespace), [listening, namespace]),
+    queue = dueQueue(visible, reviews, new Date(tick)),
     reviewMap = new Map(reviews.map((r) => [r.key, r])),
     current = items.find((k) => k.key === selected),
     subjectInfo = subjects.find((s) => s.id === subject)!,
     subjectItems = visible.filter((k) => k.subject === subject),
     lastItem = visible.find((k) => k.key === last);
+  contentRef.current = current?.content_hash;
+  useLayoutEffect(() => {
+    setRecallPhase("hidden");
+    attemptId.current = crypto.randomUUID();
+  }, [selected, current?.content_hash]);
   useEffect(() => {
     if (ready)
       void player.prepareCached(items.filter((k) => k.namespace === namespace));
@@ -365,23 +381,59 @@ export default function App() {
     if (page !== "read" || selected !== k.key) open(k);
     void player.start(k, subjectPlaylist(visible, k));
   };
-  const reviewRate = async (value: 1 | 3) => {
-    if (!current || ratingLock.current) return;
+  const saveRecall = async (value: 1 | 3) => {
+    if (!current || ratingLock.current) return false;
     ratingLock.current = true;
     setRating(true);
     try {
-      const did = await rate(current, value, crypto.randomUUID());
+      const operation = attemptId.current || (attemptId.current = crypto.randomUUID());
+      const did = await rate(current, value, operation);
+      const previousEvent = !did ? await (await database()).get("events", operation) : undefined;
       await refresh();
-      if (did)
-        report(`已记录“${value === 1 ? "忘了" : "认识"}”，仅用于安排复习`);
-      else report("刚刚已记录，请稍后再评价");
+      if (previousEvent?.key === current.key && previousEvent.rating === value) return true;
+      if (!did) report("这张卡还在复习间隔中，请稍后再确认");
+      return did;
     } catch {
-      report("记录保存失败，请备份或检查本地存储");
+      report("记录保存失败，请检查本机存储后重试");
+      return false;
     } finally {
       setRating(false);
-      setTimeout(() => {
-        ratingLock.current = false;
-      }, 2600);
+      ratingLock.current = false;
+    }
+  };
+  const forget = async () => {
+    if (advanceLock.current) return;
+    const key = current?.key;
+    const hash = current?.content_hash;
+    if (await saveRecall(1)) {
+      if (selectedRef.current === key && contentRef.current === hash) setRecallPhase("forgotten");
+    }
+  };
+  const nextCard = async () => {
+    if (!current || ratingLock.current || advanceLock.current || recallPhase === "hidden") return;
+    advanceLock.current = true;
+    try {
+      const key = current.key;
+      const hash = current.content_hash;
+      if (recallPhase === "remembered" && !await saveRecall(3)) return;
+      if (selectedRef.current !== key || contentRef.current !== hash) return;
+      const data = await snapshot();
+      const next = pickNext(data.items, data.reviews, current.subject, current.namespace, key);
+      const wasPlaying = player.playing;
+      if (wasPlaying) player.toggle();
+      if (next) {
+        open(next, true);
+        if (wasPlaying && next.audio_path) void player.start(next, subjectPlaylist(visible, next));
+      } else {
+        chooseReviewSubject(current.subject);
+        go("review");
+        report(data.reviews.some(r => r.key.startsWith(current.namespace + "::" + current.subject + "::") && r.practice?.remaining)
+          ? "待巩固卡片稍后再次出现，可先听读其他内容" : "本科目本轮已完成，明天继续回想");
+      }
+    } catch {
+      report("下一张加载失败，记录已保留，请重试");
+    } finally {
+      advanceLock.current = false;
     }
   };
   const saveConfig = async () => {
@@ -455,9 +507,11 @@ export default function App() {
             {r
               ? r.revision !== k.learning_revision
                 ? "内容已变更 · 需要重新学习"
-                : isDue
+                : r.practice?.remaining
+                  ? `待巩固 · 还需记对 ${r.practice.remaining} 次${Date.parse(r.practice.ready_at) > tick ? ` · ${Math.ceil((Date.parse(r.practice.ready_at) - tick) / 1000)}秒后` : ""}`
+                  : isDue
                   ? "已到复习时间"
-                  : `下次 ${dateText(r.card.due)}`
+                  : `下次 ${dateText(reviewDue(r))}`
               : "尚未复习"}
           </small>
         </span>
@@ -482,8 +536,7 @@ export default function App() {
   };
   const nav = [
     { id: "home", name: "首页", icon: House },
-    { id: "review", name: "今日复习", icon: CalendarDays },
-    { id: "player", name: "随身听", icon: Headphones },
+    { id: "review", name: "听读复习", icon: Headphones },
     { id: "settings", name: "设置", icon: Settings },
   ] as const;
   return (
@@ -501,7 +554,7 @@ export default function App() {
         {nav.map((n) => (
           <button
             key={n.id}
-            className={"side-nav " + (page === n.id ? "chosen" : "")}
+            className={"side-nav " + ((page === n.id || (n.id === "review" && page === "read")) ? "chosen" : "")}
             onClick={() => go(n.id)}
           >
             <n.icon size={19} />
@@ -532,7 +585,7 @@ export default function App() {
               : page === "settings"
                 ? "设置"
                 : page === "review"
-                  ? "间隔复习"
+                  ? "听读复习"
                   : page === "player"
                     ? "随身听"
                     : "知识资料"}
@@ -570,28 +623,11 @@ export default function App() {
             </button>
           </div>
         </header>
-        {notice && (
-          <div className="notice" role="status">
-            <span>{notice}</span>
-            <button aria-label="关闭提示" onClick={() => setNotice("")}>
-              <X size={16} />
-            </button>
-          </div>
-        )}
-        {updateReady && (
-          <div className="notice">
-            <span>应用有新版本，点击“立即更新”即可使用。</span>
-            <button
-              className="text-button"
-              onClick={() => {
-                if (player.playing) player.toggle();
-                window.dispatchEvent(new Event("app-apply-update"));
-              }}
-            >
-              立即更新
-            </button>
-          </div>
-        )}
+        <Toast message={notice} updateReady={updateReady} close={() => setNotice("")}
+          apply={() => {
+            if (player.playing) player.toggle();
+            window.dispatchEvent(new Event("app-apply-update"));
+          }} />
         {!ready ? (
           <div className="empty">
             <RefreshCw />
@@ -659,11 +695,11 @@ export default function App() {
                     </p>
                   )}
                 </section>
-                <div className="hero-grid">
+                <div className="study-hero">
                   <section className="review-hero">
                     <div className="hero-top">
                       <span>
-                        <span className="live-dot" /> 间隔复习
+                        <span className="live-dot" /> 听读复习
                       </span>
                       <CalendarDays size={22} />
                     </div>
@@ -672,52 +708,19 @@ export default function App() {
                       <span>个知识点等待回想</span>
                     </div>
                     <p>
-                      到期内容优先，新知识随后。
+                      同科随机回想，阅读和收听在同一张卡片。
                       <br />
-                      每次只需选择「忘了」或「认识」。
+                      先选「记得／不记得」，揭示后核对。
                     </p>
                     <button
                       className="light-button"
                       onClick={() => go("review")}
                     >
-                      开始今日复习 <ArrowUpRight size={18} />
+                      开始听读复习 <ArrowUpRight size={18} />
                     </button>
                     <div className="hero-rings" aria-hidden="true" />
                   </section>
-                  <section className="listen-hero">
-                    <div className="listen-copy">
-                      <span className="pill">
-                        <Headphones size={14} /> 自由听读
-                      </span>
-                      <h2>
-                        把碎片时间
-                        <br />
-                        留给一点新收获
-                      </h2>
-                      <p>同一份知识，换一种相遇方式。</p>
-                      <button
-                        className="text-button"
-                        onClick={() => {
-                          const k = lastItem?.audio_path
-                            ? lastItem
-                            : visible.find((k) => k.audio_path);
-                          if (k) listen(k);
-                          else report("当前资料尚无音频，可先自由阅读");
-                        }}
-                      >
-                        听一听 <ArrowUpRight size={17} />
-                      </button>
-                    </div>
-                    <div className="sound-art" aria-hidden="true">
-                      <Headphones />
-                      <div className="sound-bars">
-                        {[18, 36, 54, 30, 66, 44, 22, 40, 18].map((v, i) => (
-                          <i key={i} style={{ height: v }} />
-                        ))}
-                      </div>
-                      <span>随时，随地</span>
-                    </div>
-                  </section>
+
                 </div>
                 <div className="section-heading">
                   <div>
@@ -928,12 +931,13 @@ export default function App() {
             )}
             {page === "review" && (
               <>
+                {lastItem && <button className="secondary" onClick={() => open(lastItem, true)}>继续上次 · {lastItem.title}</button>}
                 <div className="page-heading">
                   <div>
                     <p className="eyebrow">SPACED REPETITION</p>
-                    <h1>今日，回想一下。</h1>
+                    <h1>听一听，也回想一下。</h1>
                     <p className="subtitle">
-                      到期优先 · 自评只决定下次复习时间
+                      同科随机 · 答错后两次记对 · 复习间隔最长 5 天
                     </p>
                   </div>
                   <div className="count-label">
@@ -973,10 +977,19 @@ export default function App() {
                     <>
                       <button
                         className="primary large"
-                        onClick={() => open(list[0], true)}
+                        disabled={!list.some(k => readyToStudy(k, reviewMap.get(k.key), new Date(tick)))}
+                        onClick={() => {
+                          const first = list.find(k => readyToStudy(k, reviewMap.get(k.key)));
+                          if (!first) return;
+                          const chosen = reviewSubject === "all" ? first.subject : reviewSubject;
+                          chooseReviewSubject(chosen);
+                          const next = pickNext(visible, reviews, chosen, namespace);
+                          if (next) open(next, true);
+                        }}
                       >
-                        开始回想 <ArrowUpRight size={18} />
+                        随机开始 <ArrowUpRight size={18} />
                       </button>
+                      <p className="help">答错卡片至少间隔 45 秒；如果还没到时间，可以先听读其他卡片。</p>
                       <div className="panel review-list">
                         {list.map((k) => (
                           <div
@@ -994,8 +1007,8 @@ export default function App() {
                   ) : (
                     <div className="empty">
                       <CheckCircle2 />
-                      这一组已没有待复习内容
-                      <p>也可以随时回到四科目录自由听读。</p>
+                      这一组今日已完成
+                      <p>也可以从首页的科目目录继续自由听读。</p>
                     </div>
                   );
                 })()}
@@ -1009,7 +1022,7 @@ export default function App() {
                     onClick={() => go(reviewMode ? "review" : "subject")}
                   >
                     <ArrowLeft size={17} />
-                    {reviewMode ? "今日复习" : current.module_title}
+                    {reviewMode ? "听读复习" : current.module_title}
                   </button>
                   <div className="reading-header">
                     <p className="eyebrow">
@@ -1074,85 +1087,18 @@ export default function App() {
                       </button>
                     )}
                   </div>
-                  <article className="markdown panel">
-                    <Markdown
-                      remarkPlugins={[remarkGfm, remarkMath]}
-                      rehypePlugins={[
-                        [rehypeKatex, { strict: false, trust: false }],
-                      ]}
-                      components={{
-                        img: () => null,
-                        a: ({ children, href }) =>
-                          /^https?:\/\//.test(href || "") ? (
-                            <a
-                              href={href}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                            >
-                              {children}
-                            </a>
-                          ) : (
-                            <span>{children}</span>
-                          ),
-                      }}
-                    >
-                      {current.reading}
-                    </Markdown>
-                  </article>
+                  <Suspense fallback={<p className="help">正在排版正文…</p>}><MaskedMarkdown content={current.reading} revealed={recallPhase !== "hidden"} /></Suspense>
                   {current.source_note && (
                     <p className="source-note">来源：{current.source_note}</p>
                   )}
-                  <section className="rating-panel">
-                    <p>
-                      刚才的内容，你还记得吗？
-                      <small>自评认识 ≠ 考试式独立掌握</small>
-                    </p>
-                    <div>
-                      <button
-                        className="again"
-                        disabled={rating}
-                        onClick={() => void reviewRate(1)}
-                      >
-                        <RotateCcw size={18} />
-                        <span>
-                          忘了<small>尽快再复习</small>
-                        </span>
-                      </button>
-                      <button
-                        className="good"
-                        disabled={rating}
-                        onClick={() => void reviewRate(3)}
-                      >
-                        <Check size={20} />
-                        <span>
-                          认识<small>适当延长间隔</small>
-                        </span>
-                      </button>
-                    </div>
-                    {reviewMap.get(current.key) && (
-                      <small className="next-date">
-                        下次复习：
-                        {dateText(reviewMap.get(current.key)!.card.due)}
-                      </small>
-                    )}
-                    {reviewMode && (
-                      <button
-                        className="text-button next-review"
-                        onClick={() => {
-                          const next = queue.find(
-                            (k) =>
-                              k.subject === current.subject &&
-                              k.namespace === current.namespace &&
-                              k.key !== current.key,
-                          );
-                          if (next) open(next, true);
-                          else go("review");
-                        }}
-                      >
-                        下一个知识点 <ChevronRight size={16} />
-                      </button>
-                    )}
-                  </section>
+                  <RecallActions phase={recallPhase} busy={rating}
+                    cooldown={reviewMap.get(current.key)?.revision === current.learning_revision && reviewMap.get(current.key)?.practice?.remaining ? Math.max(0, Math.ceil((Date.parse(reviewMap.get(current.key)!.practice!.ready_at) - tick) / 1000)) : 0}
+                    remaining={reviewMap.get(current.key)?.revision === current.learning_revision ? reviewMap.get(current.key)?.practice?.remaining || 0 : 0}
+                    onRemember={() => setRecallPhase("remembered")} onForget={() => void forget()} onNext={() => void nextCard()} />
+                  {reviewMap.get(current.key) && !reviewMap.get(current.key)?.practice?.remaining && <p className="next-date">
+                    下次复习：{dateText(reviewDue(reviewMap.get(current.key)!))}
+                  </p>}
+
                 </>
               ) : (
                 <div className="empty">
@@ -1425,7 +1371,7 @@ export default function App() {
                     </select>
                   </label>
                   <small className="help">
-                    随身听 v0.2.3 · 数据结构 v1 · 本地优先
+                    随身听 v0.3.0 · 数据结构 v1 · 本地优先
                   </small>
                 </section>
               </>
@@ -1440,40 +1386,11 @@ export default function App() {
           <span>随身听 · 个人考研知识库</span>
         </footer>
       </main>
-      {player.current &&
-        !(page === "read" && selected === player.current.key) && (
-          <div className="mini-player">
-            <button className="mini-title" onClick={() => go("player")}>
-              <Headphones size={20} />
-              <span>
-                {player.current.title}
-                <small>
-                  {player.playing ? "正在收听" : "继续收听"} ·{" "}
-                  {clock(player.time)}
-                </small>
-              </span>
-            </button>
-            <button
-              aria-label={player.playing ? "暂停音频" : "继续音频"}
-              disabled={player.loading}
-              onClick={player.toggle}
-            >
-              {player.playing ? <Pause size={21} /> : <Play size={21} />}
-            </button>
-            <button
-              aria-label="下一条音频"
-              disabled={!player.hasNext}
-              onClick={() => player.skip(1)}
-            >
-              <SkipForward size={20} />
-            </button>
-          </div>
-        )}
       <nav className="bottom-nav">
         {nav.map((n) => (
           <button
             key={n.id}
-            className={page === n.id ? "chosen" : ""}
+            className={(page === n.id || (n.id === "review" && page === "read")) ? "chosen" : ""}
             onClick={() => {
               go(n.id);
             }}

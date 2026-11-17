@@ -417,10 +417,10 @@ describe("backup", () => {
     await rate(k, 1, "a", now);
     const b = await exportBackup();
     await (await database()).put("settings", "secret", "token");
-    await rate(k, 3, "b", new Date(now.getTime() + 5000));
+    await rate(k, 3, "b", new Date(now.getTime() + 45000));
     await restoreBackup(JSON.parse(JSON.stringify(b)));
     expect((await snapshot()).reviews[0].updated_at).toBe(
-      new Date(now.getTime() + 5000).toISOString(),
+      new Date(now.getTime() + 45000).toISOString(),
     );
     expect(JSON.stringify(await exportBackup())).not.toContain("secret");
     expect(await (await database()).getAll("events")).toHaveLength(2);

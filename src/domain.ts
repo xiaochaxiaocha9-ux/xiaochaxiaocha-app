@@ -62,6 +62,19 @@ export interface Review {
   card: Card;
   revision: number;
   updated_at: string;
+  practice?: Practice;
+}
+export interface Practice {
+  day: string;
+  remaining: 0 | 1 | 2;
+  ready_at: string;
+}
+export const MAX_REVIEW_DAYS = 5;
+export const localDay = (now = new Date()) =>
+  `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+export function reviewDue(r: Review) {
+  const last = new Date(r.card.last_review || r.updated_at).getTime();
+  return new Date(Math.min(new Date(r.card.due).getTime(), last + MAX_REVIEW_DAYS * 86400000));
 }
 export interface ReviewEvent {
   id: string;
@@ -187,9 +200,10 @@ export async function sha256(data: string | ArrayBuffer) {
     .join("");
 }
 export function due(k: Knowledge, r: Review | undefined, now = new Date()) {
-  return (
-    !r || r.revision !== k.learning_revision || new Date(r.card.due) <= now
-  );
+  if (!r || r.revision !== k.learning_revision) return true;
+  if (r.practice?.remaining) return true;
+  if (r.practice?.day === localDay(now)) return false;
+  return reviewDue(r) <= now;
 }
 export function dueQueue(
   items: Knowledge[],

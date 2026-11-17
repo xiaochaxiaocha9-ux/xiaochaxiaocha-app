@@ -7,7 +7,7 @@ export const playbackModes: PlaybackMode[] = ["once", "repeat", "next"];
 export const playbackLabels: Record<PlaybackMode, string> = {
   once: "仅播放一次",
   repeat: "循环本卡片",
-  next: "自动下一节",
+  next: "同科随机连播",
 };
 export function subjectPlaylist(items: Knowledge[], current: Knowledge) {
   return items
@@ -26,6 +26,14 @@ export function subjectPlaylist(items: Knowledge[], current: Knowledge) {
           numeric: true,
         }),
     );
+}
+export function shuffledPlaylist(items: Knowledge[], current: Knowledge, random = Math.random) {
+  const rest = subjectPlaylist(items, current).filter(k => k.key !== current.key);
+  for (let i = rest.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [rest[i], rest[j]] = [rest[j], rest[i]];
+  }
+  return [current, ...rest];
 }
 export interface PlaybackState {
   current?: Knowledge;
@@ -228,17 +236,17 @@ export class PlaybackController {
     this.meter.anchor(this.audio.currentTime, speed);
     this.update({ speed });
   }
-  async start(k: Knowledge, list = this.queue, resume = true) {
+  async start(k: Knowledge, list = this.queue, resume = true, shuffle = false) {
     if (this.disposed || !k.audio_path || !active(k)) return;
     const generation = ++this.generation;
     void this.save();
     this.stopListening();
     this.audio.pause();
     this.audio.onloadedmetadata = null;
-    this.queue = subjectPlaylist(
-      list.some((x) => x.key === k.key) ? list : [...list, k],
-      k,
-    );
+    const candidates = list.some((x) => x.key === k.key) ? list : [...list, k];
+    this.queue = list === this.queue
+      ? candidates.filter(x => active(x) && x.audio_path && x.subject === k.subject && x.namespace === k.namespace)
+      : shuffle ? shuffledPlaylist(candidates, k) : subjectPlaylist(candidates, k);
     const index = this.queue.findIndex((x) => x.key === k.key);
     this.update({
       current: k,

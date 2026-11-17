@@ -66,13 +66,20 @@ const samples: {
 ];
 export async function seedDemo() {
   const db = await database();
-  if (await db.get("settings", "demo-seeded")) return;
+  if (await db.get("settings", "demo-seeded-recall-v1")) return;
   const hashes = (await (
     await fetch(import.meta.env.BASE_URL + "demo/hashes.json")
   ).json()) as Record<string, string>;
   const items: Knowledge[] = await Promise.all(
     samples.map(async (s, i) => {
-      const reading_hash = await sha256(s.reading),
+      const reading = s.subject === "politics"
+        ? s.reading.replace("**实践是认识的基础。**", "**实践**{{是认识的基础。}}")
+          .replace("观察事物时，注意它与周围条件的相互影响。", "观察事物时，{{注意它与周围条件的相互影响。}}")
+        : s.subject === "environment"
+          ? s.reading.replace("通过观察、测定等方式获得环境状况的信息。", "{{通过观察、测定等方式获得环境状况的信息。}}")
+            .replace("在已有信息与假设条件下，估计未来可能发生的变化。", "{{在已有信息与假设条件下，估计未来可能发生的变化。}}")
+          : s.reading;
+      const reading_hash = await sha256(reading),
         audio_path = s.listening ? `demo/${s.id}.mp3` : undefined;
       return {
         schema_version: 1,
@@ -83,7 +90,7 @@ export async function seedDemo() {
         chapter: s.chapter,
         knowledge_id: s.id,
         title: s.title,
-        reading: s.reading,
+        reading,
         reading_path: `demo/${s.id}.md`,
         reading_hash,
         content_hash: reading_hash,
@@ -97,5 +104,5 @@ export async function seedDemo() {
     }),
   );
   await commitContent("demo", items);
-  await db.put("settings", true, "demo-seeded");
+  await db.put("settings", true, "demo-seeded-recall-v1");
 }
